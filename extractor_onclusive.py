@@ -160,10 +160,26 @@ def texto_de_fila(row):
         row,
         ["Contenido", "Detail", "Summary", "Síntesis", "Sintesis", "Nota", "Text", "Texto"]
     )
-    if contenido and titulo and quitar_acentos(titulo) not in quitar_acentos(contenido):
-        bruto = f"{titulo}. {contenido}"
+
+    # Onclusive suele exportar un Title truncado con "..." y después el Detail completo.
+    # Antes se unían ambos y el Word repetía el inicio de la publicación. Ahora se detecta
+    # cuando el título es solo un prefijo/resumen del contenido y se conserva el Detail.
+    if contenido and titulo:
+        titulo_core = re.split(r"(?:\.{3,}|…)", html.unescape(titulo), maxsplit=1)[0].strip()
+        t_core = quitar_acentos(titulo_core)
+        c_norm = quitar_acentos(html.unescape(contenido))
+        t_norm = quitar_acentos(html.unescape(titulo))
+
+        titulo_ya_esta = False
+        if len(t_core) >= 24 and t_core in c_norm:
+            titulo_ya_esta = True
+        elif len(t_norm) >= 24 and t_norm in c_norm:
+            titulo_ya_esta = True
+
+        bruto = contenido if titulo_ya_esta else f"{titulo}. {contenido}"
     else:
         bruto = contenido or titulo
+
     return limpiar_texto_publicacion(bruto)
 
 
@@ -172,6 +188,131 @@ def normalizar_texto_dup(texto):
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"[^a-z0-9#@ ]", "", t)
     return t.strip()
+
+
+# Palabras funcionales que no ayudan a definir un tema.
+STOPWORDS_TEMA = {
+    "a", "al", "ante", "bajo", "como", "con", "contra", "de", "del", "desde",
+    "durante", "e", "el", "ella", "ellas", "ellos", "en", "entre", "es", "esta",
+    "este", "esto", "hacia", "hasta", "la", "las", "lo", "los", "o", "para", "pero",
+    "por", "que", "se", "sin", "sobre", "su", "sus", "un", "una", "y"
+}
+
+
+def normalizar_busqueda(texto):
+    """Normalización tolerante a acentos, hashtags, HTML y signos."""
+    t = html.unescape(str(texto or ""))
+    t = quitar_acentos(t)
+    t = re.sub(r"https?://\\S+", " ", t)
+    t = re.sub(r"[^a-z0-9@#_ ]+", " ", t)
+    t = re.sub(r"\\s+", " ", t).strip()
+    return t
+
+
+def compactar_busqueda(texto):
+    """Sirve para detectar #LaBonitaSánchez, @bonita_sanchez_oficial, etc."""
+    return re.sub(r"[^a-z0-9]+", "", normalizar_busqueda(texto))
+
+
+def parsear_lista_reglas(texto):
+    """Acepta reglas separadas por coma, punto y coma o salto de línea."""
+    if not texto:
+        return []
+    partes = re.split(r"[\\n,;]+", str(texto))
+    salida = []
+    vistos = set()
+    for p in partes:
+        p = p.strip()
+        if not p:
+            continue
+        clave = compactar_busqueda(p)
+        if clave and clave not in vistos:
+            vistos.add(clave)
+            salida.append(p)
+    return salida
+
+
+def terminos_desde_tema(tema):
+    """Extrae automáticamente las palabras útiles del tema escrito por el usuario."""
+    tokens = re.findall(r"[a-z0-9áéíóúñü]+", str(tema or "").lower())
+    salida = []
+    vistos = set()
+    for token in tokens:
+        n = quitar_acentos(token)
+        if len(n) < 3 or n in STOPWORDS_TEMA or n in vistos:
+            continue
+        vistos.add(n)
+        salida.append(n)
+    return salida
+
+
+def coincidencias_reglas(texto, reglas):
+    """Devuelve las reglas encontradas, tolerando hashtags y guiones bajos."""
+    normal = normalizar_busqueda(texto)
+    compacto = compactar_busqueda(texto)
+    encontrados = []
+    for regla in reglas:
+        rn = normalizar_busqueda(regla).strip()
+        rc = compactar_busqueda(regla)
+        if not rn:
+            continue
+        # Frases normales o versiones pegadas: #GabyBonitaSanchez / bonita_sanchez.
+        if rn in normal or (len(rc) >= 4 and rc in compacto):
+            encontrados.append(regla)
+    return encontrados
+
+
+def evaluar_relevancia_tema(
+    texto,
+    tema,
+    aliases=None,
+    terminos_extra=None,
+    exclusiones=None,
+    min_coincidencias=2,
+):
+    """
+    Decide si una publicación pertenece al tema.
+
+    Reglas:
+    1) Si se proporcionan aliases/actor, debe aparecer al menos uno.
+    2) El tema se convierte automáticamente en palabras útiles y se cuentan coincidencias.
+    3) Los términos extra funcionan como sinónimos o conceptos adicionales.
+    4) Las exclusiones son absolutas y se aplican al final.
+
+    Retorna: (es_relevante, motivo, coincidencias)
+    """
+    aliases = aliases or []
+    terminos_extra = terminos_extra or []
+    exclusiones = exclusiones or []
+
+    # Exclusiones explícitas: si el usuario las escribe, prevalecen.
+    hits_exclusion = coincidencias_reglas(texto, exclusiones)
+    if hits_exclusion:
+        return False, f"Exclusión: {', '.join(hits_exclusion[:3])}", hits_exclusion
+
+    hits_alias = coincidencias_reglas(texto, aliases)
+    if aliases and not hits_alias:
+        return False, "No aparece el actor/alias requerido", []
+
+    terminos_base = terminos_desde_tema(tema)
+    reglas_tema = list(terminos_base) + list(terminos_extra)
+    # Evita que alias muy obvios cuenten dos veces como concepto del tema cuando el usuario
+    # ya decidió exigirlos por separado.
+    hits_tema = coincidencias_reglas(texto, reglas_tema)
+
+    # En temas de una sola palabra basta una coincidencia; en los demás, por defecto dos.
+    minimo = max(1, int(min_coincidencias or 1))
+    if len(reglas_tema) == 1:
+        minimo = 1
+
+    if len(hits_tema) < minimo:
+        detalle = ", ".join(hits_tema[:4]) if hits_tema else "ninguna"
+        return False, f"Fuera de tema: {len(hits_tema)}/{minimo} coincidencias ({detalle})", hits_tema
+
+    motivo = f"Tema: {len(hits_tema)} coincidencias"
+    if hits_alias:
+        motivo += f" · alias: {hits_alias[0]}"
+    return True, motivo, hits_tema
 
 
 def es_rt(row, texto, red):
@@ -332,16 +473,43 @@ def fuente_desglose(red, autor, handle):
     return autor or handle or red
 
 
-def procesar_onclusive(df, tema, resolver_remoto=False):
+def procesar_onclusive(
+    df,
+    tema,
+    resolver_remoto=False,
+    aliases=None,
+    terminos_extra=None,
+    exclusiones=None,
+    cuentas_excluir=None,
+    min_coincidencias=2,
+    deduplicar_texto=False,
+    recortar_texto=False,
+    redes_permitidas=None,
+):
+    """
+    Procesa Onclusive con filtro temático real.
+
+    Diferencia clave respecto a la versión anterior:
+    - `tema` ya no se usa solo para recortar el texto: ahora decide qué entra y qué se excluye.
+    - Por defecto NO elimina publicaciones distintas que tengan el mismo texto. Solo elimina
+      el mismo permalink repetido. Esto conserva republicaciones válidas en X/Facebook/Instagram.
+    """
     registros = []
+    excluidos = []
     stats = Counter()
     vistos_links = set()
     vistos_texto_fuente = set()
 
+    aliases = aliases or []
+    terminos_extra = terminos_extra or []
+    exclusiones = exclusiones or []
+    cuentas_excluir = {compactar_busqueda(x) for x in (cuentas_excluir or []) if x}
+    redes_ok = set(redes_permitidas or REDES_PERMITIDAS)
+
     for idx, row in df.iterrows():
         link_raw = obtener_link_principal(row)
         red = detectar_red(row)
-        if red not in REDES_PERMITIDAS:
+        if red not in redes_ok:
             stats["otras_redes"] += 1
             continue
 
@@ -360,50 +528,83 @@ def procesar_onclusive(df, tema, resolver_remoto=False):
         if not handle and resolver_remoto and red in {"INSTAGRAM", "TIKTOK"}:
             handle = resolver_usuario_publico(link_raw, red)
 
-        # Si el "autor" de Facebook es un ID numérico, no lo mostramos.
         if red == "FACEBOOK" and re.fullmatch(r"@?\d{7,}", autor or ""):
             autor = "Facebook"
 
-        fuente_key = quitar_acentos(handle or autor or red)
-        texto_key = normalizar_texto_dup(texto)
+        cuenta_key = compactar_busqueda(handle or autor or "")
+        if cuenta_key and cuenta_key in cuentas_excluir:
+            stats["cuenta_excluida"] += 1
+            excluidos.append({
+                "orden": idx, "red": red, "autor": autor, "handle": handle,
+                "texto": texto, "link": link or link_raw,
+                "motivo": "Cuenta excluida"
+            })
+            continue
 
+        # Para decidir relevancia usamos texto + autor + handle. Esto permite reconocer
+        # menciones como @bonita_sanchez_oficial aunque el cuerpo no repita el nombre.
+        texto_clasificar = " ".join(x for x in [texto, autor, handle] if x)
+        relevante, motivo_tema, hits_tema = evaluar_relevancia_tema(
+            texto_clasificar,
+            tema,
+            aliases=aliases,
+            terminos_extra=terminos_extra,
+            exclusiones=exclusiones,
+            min_coincidencias=min_coincidencias,
+        )
+        if not relevante:
+            stats["fuera_tema"] += 1
+            excluidos.append({
+                "orden": idx, "red": red, "autor": autor, "handle": handle,
+                "texto": texto, "link": link or link_raw,
+                "motivo": motivo_tema,
+            })
+            continue
+
+        # Mismo permalink = mismo post: sí se depura.
         if link and link in vistos_links:
             stats["dup_link"] += 1
             continue
-        if texto_key and (fuente_key, texto_key) in vistos_texto_fuente:
-            stats["dup_texto"] += 1
-            continue
-
         if link:
             vistos_links.add(link)
-        if texto_key:
-            vistos_texto_fuente.add((fuente_key, texto_key))
+
+        # Mismo texto en otro post o plataforma NO se elimina por defecto.
+        # Se deja como opción porque en monitoreo suele representar otro impacto real.
+        if deduplicar_texto:
+            fuente_key = quitar_acentos(handle or autor or red)
+            texto_key = normalizar_texto_dup(texto)
+            if texto_key and (fuente_key, texto_key) in vistos_texto_fuente:
+                stats["dup_texto"] += 1
+                continue
+            if texto_key:
+                vistos_texto_fuente.add((fuente_key, texto_key))
 
         fecha_raw = obtener_campo(
             row,
             ["Publish date", "Fecha", "Date", "Fecha de publicación", "Fecha de publicacion", "Published", "Publication date"]
         )
         fecha = parsear_fecha(fecha_raw)
-        texto = recortar_por_tema(texto, tema)
+        texto_salida = recortar_por_tema(texto, tema) if recortar_texto else texto
 
         registros.append({
             "orden": idx,
             "red": red,
             "autor": autor,
             "handle": handle,
-            "texto": texto,
+            "texto": texto_salida,
             "link": link or link_raw,
             "fecha": fecha,
+            "motivo_tema": motivo_tema,
+            "coincidencias_tema": hits_tema,
         })
 
-    # Fechas válidas primero y, dentro de cada fecha, respeta el orden original.
     registros.sort(
         key=lambda r: (
             pd.Timestamp.max if pd.isna(r["fecha"]) else r["fecha"].normalize(),
             r["orden"],
         )
     )
-    return registros, stats
+    return registros, stats, excluidos
 
 
 def agregar_hipervinculo(parrafo, texto, url):
@@ -547,56 +748,195 @@ def crear_html(registros):
 def render_extractor_onclusive():
     st.subheader("Extracción de menciones Onclusive por tema")
     st.caption(
-        "Extrae Facebook, X, Instagram y TikTok; elimina RT/duplicados y genera Word, HTML y TXT."
+        "Filtra por tema real, conserva impactos distintos aunque repitan texto, elimina RT/permalinks duplicados "
+        "y genera Word, HTML y TXT."
     )
 
     tema = st.text_input(
-        "Nombre del tema",
-        placeholder="Ej. Seguridad en Puebla, Cablebús, Gira de trabajo por Zacatlán",
+        "Tema principal",
+        placeholder="Ej. Gaby La Bonita Sánchez como aspirante por la alcaldía de Puebla",
         key="onclusive_tema",
+        help=(
+            "El programa extrae automáticamente las palabras útiles del tema y las usa para decidir qué publicaciones pertenecen a él."
+        ),
     ).strip()
+
     archivo = st.file_uploader(
         "Sube el Excel o CSV exportado desde Onclusive",
         type=["xlsx", "xls", "csv"],
         key="onclusive_archivo",
     )
-    resolver = st.checkbox(
-        "Intentar recuperar usuarios faltantes de Instagram/TikTok desde publicaciones públicas",
-        value=False,
-        help=(
-            "TikTok suele poder resolverse desde el enlace. En Instagram no siempre es posible; "
-            "el intento remoto depende de que la publicación sea pública y accesible sin iniciar sesión."
-        ),
-        key="onclusive_resolver_usuarios",
+
+    if tema:
+        detectados = terminos_desde_tema(tema)
+        st.caption("Palabras detectadas del tema: " + (", ".join(detectados) if detectados else "sin términos suficientes"))
+    else:
+        detectados = []
+
+    with st.expander("Afinar tema y exclusiones", expanded=True):
+        aliases_txt = st.text_area(
+            "Actor, nombre y alias (opcional, recomendado cuando el tema es una persona)",
+            placeholder=(
+                "Gaby Sánchez, Gabriela Sánchez, La Bonita, Bonita Sánchez, Bonita_sanchez\n"
+                "Si escribes alias aquí, la publicación deberá mencionar al menos uno."
+            ),
+            key="onclusive_aliases",
+            height=95,
+        )
+        extras_txt = st.text_area(
+            "Sinónimos o conceptos adicionales del tema (opcional)",
+            placeholder="presidencia municipal, candidatura, proceso interno, levanta la mano, se destapa, contender, 2027",
+            key="onclusive_terminos_extra",
+            height=85,
+        )
+        exclusiones_txt = st.text_area(
+            "Excluir siempre si aparece alguna de estas frases (opcional)",
+            placeholder="Escribe solo exclusiones absolutas, una por línea o separadas por coma",
+            key="onclusive_exclusiones",
+            height=75,
+            help=(
+                "Estas exclusiones tienen prioridad incluso si la publicación también coincide con el tema. "
+                "Evita poner términos muy generales como 'deporte' si una nota política también puede mencionarlos."
+            ),
+        )
+        cuentas_txt = st.text_area(
+            "Cuentas/usuarios a excluir (opcional)",
+            placeholder="@DeporteGobPue, @cuenta_propia",
+            key="onclusive_cuentas_excluir",
+            height=70,
+        )
+
+        max_slider = max(1, min(5, len(detectados) + len(parsear_lista_reglas(extras_txt))))
+        default_min = 1 if max_slider == 1 else 2
+        min_coincidencias = st.slider(
+            "Coincidencias mínimas con el tema",
+            min_value=1,
+            max_value=max_slider,
+            value=min(default_min, max_slider),
+            help=(
+                "Con 2, una publicación que solo diga 'Puebla' no entra. Sube el valor para temas muy amplios; "
+                "bájalo si el tema tiene pocas palabras específicas."
+            ),
+            key="onclusive_min_coincidencias",
+        )
+
+    redes_seleccionadas = st.multiselect(
+        "Redes a incluir",
+        options=["X", "FACEBOOK", "INSTAGRAM", "TIKTOK"],
+        default=["X", "FACEBOOK", "INSTAGRAM", "TIKTOK"],
+        key="onclusive_redes",
     )
 
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        dedup_texto = st.checkbox(
+            "Eliminar mismo texto del mismo usuario",
+            value=False,
+            help=(
+                "Déjalo desactivado para trabajar como la extracción revisada: dos posts distintos cuentan como dos impactos aunque tengan el mismo texto."
+            ),
+            key="onclusive_dedup_texto",
+        )
+    with c2:
+        recortar = st.checkbox(
+            "Recortar textos largos",
+            value=False,
+            help="Desactivado conserva el texto completo limpio, como en la extracción revisada.",
+            key="onclusive_recortar",
+        )
+    with c3:
+        resolver = st.checkbox(
+            "Resolver usuarios IG/TikTok",
+            value=False,
+            help=(
+                "Intento opcional para publicaciones públicas. No usa login ni intenta evadir restricciones."
+            ),
+            key="onclusive_resolver_usuarios",
+        )
+
     if archivo and tema and st.button("Extraer menciones", type="primary", key="onclusive_extraer"):
-        with st.spinner("Depurando publicaciones y preparando entregables..."):
+        with st.spinner("Identificando el tema, aplicando exclusiones y preparando entregables..."):
             try:
                 df = cargar_onclusive(archivo)
-                registros, stats = procesar_onclusive(df, tema, resolver_remoto=resolver)
+                aliases = parsear_lista_reglas(aliases_txt)
+                extras = parsear_lista_reglas(extras_txt)
+                exclusiones = parsear_lista_reglas(exclusiones_txt)
+                cuentas_excluir = parsear_lista_reglas(cuentas_txt)
+
+                registros, stats, excluidos = procesar_onclusive(
+                    df,
+                    tema,
+                    resolver_remoto=resolver,
+                    aliases=aliases,
+                    terminos_extra=extras,
+                    exclusiones=exclusiones,
+                    cuentas_excluir=cuentas_excluir,
+                    min_coincidencias=min_coincidencias,
+                    deduplicar_texto=dedup_texto,
+                    recortar_texto=recortar,
+                    redes_permitidas=set(redes_seleccionadas),
+                )
+
                 if not registros:
-                    st.warning("No se encontraron menciones válidas en Facebook, X, Instagram o TikTok.")
+                    st.warning(
+                        "No quedaron menciones después del filtro temático. Revisa aliases, exclusiones o baja las coincidencias mínimas."
+                    )
+                    if excluidos:
+                        st.dataframe(pd.DataFrame(excluidos), use_container_width=True, hide_index=True)
                     return
 
                 total_por_red = Counter(r["red"] for r in registros)
-                st.success(f"Se extrajeron {len(registros)} menciones válidas.")
+                st.success(f"Se extrajeron {len(registros)} menciones relacionadas con el tema.")
                 st.write(
                     " · ".join(
                         f"{red.title() if red != 'X' else 'X'}: {total_por_red.get(red, 0)}"
                         for red in ["X", "FACEBOOK", "INSTAGRAM", "TIKTOK"]
+                        if red in redes_seleccionadas
                     )
                 )
 
-                omitidas = sum(stats.values())
-                if omitidas:
-                    st.caption(
-                        "Omitidas/depuradas: "
-                        f"otras redes {stats['otras_redes']}, RT {stats['rt']}, "
-                        f"duplicados por link {stats['dup_link']}, "
-                        f"duplicados por texto y fuente {stats['dup_texto']}, "
-                        f"sin texto {stats['sin_texto']}."
-                    )
+                st.caption(
+                    "Omitidas/depuradas: "
+                    f"fuera de tema {stats['fuera_tema']}, "
+                    f"cuentas excluidas {stats['cuenta_excluida']}, "
+                    f"otras redes {stats['otras_redes']}, RT {stats['rt']}, "
+                    f"duplicados por link {stats['dup_link']}, "
+                    f"duplicados por texto {stats['dup_texto']}, "
+                    f"sin texto {stats['sin_texto']}."
+                )
+
+                # Vista de control: permite comprobar qué entró y qué quedó fuera antes de descargar.
+                tab_in, tab_out = st.tabs([
+                    f"Incluidas ({len(registros)})",
+                    f"Excluidas por tema/reglas ({len(excluidos)})",
+                ])
+                with tab_in:
+                    vista_in = pd.DataFrame([
+                        {
+                            "Red": r["red"],
+                            "Usuario": (f"@{r['handle']}" if r["handle"] else r["autor"]),
+                            "Texto": r["texto"],
+                            "Motivo": r.get("motivo_tema", ""),
+                            "Link": r["link"],
+                        }
+                        for r in registros
+                    ])
+                    st.dataframe(vista_in, use_container_width=True, hide_index=True)
+                with tab_out:
+                    if excluidos:
+                        vista_out = pd.DataFrame([
+                            {
+                                "Red": r["red"],
+                                "Usuario": (f"@{r['handle']}" if r.get("handle") else r.get("autor")),
+                                "Motivo de exclusión": r.get("motivo", ""),
+                                "Texto": r.get("texto", ""),
+                                "Link": r.get("link", ""),
+                            }
+                            for r in excluidos
+                        ])
+                        st.dataframe(vista_out, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No hubo publicaciones excluidas por el filtro temático.")
 
                 faltan_handle = sum(
                     1 for r in registros if r["red"] in {"X", "INSTAGRAM", "TIKTOK"} and not r["handle"]
@@ -632,3 +972,4 @@ def render_extractor_onclusive():
                 )
             except Exception as exc:
                 st.error(f"Error al procesar el archivo: {exc}")
+
