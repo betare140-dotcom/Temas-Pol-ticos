@@ -900,20 +900,155 @@ def crear_html(registros):
     return "".join(partes).encode("utf-8")
 
 
+
+def crear_excel_entrenamiento(registros, tema=""):
+    """
+    Genera un Excel listo para volver a cargarse como entrenamiento adicional.
+
+    - La primera hoja se llama 'Entrenamiento' para que pd.read_excel()
+      la lea directamente en sentimiento_local.py.
+    - Las filas que siguen en REVISAR quedan con etiqueta vacía y no
+      entrenarán al modelo hasta que el usuario las resuelva.
+    """
+    filas = []
+    for r in registros:
+        sentimiento_actual = str(r.get("sentimiento", "") or "").upper()
+        etiqueta = "" if sentimiento_actual == REVISAR else sentimiento_actual
+
+        usuario = ""
+        if r.get("handle"):
+            usuario = f"@{r['handle']}"
+        elif r.get("autor"):
+            usuario = r.get("autor", "")
+
+        filas.append({
+            "actor": "",
+            "tema": tema,
+            "red": r.get("red", ""),
+            "fuente": r.get("autor", "") or usuario,
+            "usuario": usuario,
+            "texto": r.get("texto", ""),
+            "enlace": r.get("link", ""),
+            "etiqueta": etiqueta,
+            "clasificacion_inicial": r.get(
+                "sentimiento_inicial",
+                r.get("sentimiento_predicho", "")
+            ),
+            "prediccion_modelo": r.get("sentimiento_predicho", ""),
+            "confianza": round(
+                float(r.get("confianza_sentimiento", 0) or 0), 4
+            ),
+            "origen": "revision_manual_streamlit",
+        })
+
+    df = pd.DataFrame(filas)
+
+    resumen = pd.DataFrame([
+        ["Tema", tema],
+        ["Total de publicaciones", len(df)],
+        [
+            "POSITIVA_INFORMATIVA",
+            int((df["etiqueta"] == POSITIVA_INFORMATIVA).sum())
+        ],
+        [
+            "NEGATIVA_CRITICA",
+            int((df["etiqueta"] == NEGATIVA_CRITICA).sum())
+        ],
+        [
+            "Pendientes / REVISAR",
+            int((df["etiqueta"] == "").sum())
+        ],
+    ], columns=["Concepto", "Valor"])
+
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        # Debe ir primero: sentimiento_local.py usa la primera hoja.
+        df.to_excel(writer, sheet_name="Entrenamiento", index=False)
+        resumen.to_excel(writer, sheet_name="Resumen", index=False)
+
+        ws = writer.book["Entrenamiento"]
+        ws.freeze_panes = "A2"
+        anchos = {
+            "A": 24, "B": 36, "C": 14, "D": 28, "E": 24,
+            "F": 80, "G": 55, "H": 24, "I": 24, "J": 24,
+            "K": 14, "L": 28,
+        }
+        for col, width in anchos.items():
+            ws.column_dimensions[col].width = width
+
+        for cell in ws[1]:
+            cell.font = cell.font.copy(bold=True)
+
+        ws2 = writer.book["Resumen"]
+        ws2.freeze_panes = "A2"
+        ws2.column_dimensions["A"].width = 30
+        ws2.column_dimensions["B"].width = 45
+        for cell in ws2[1]:
+            cell.font = cell.font.copy(bold=True)
+
+    out.seek(0)
+    return out.getvalue()
+
+
+def _vista_registros(registros, con_sentimiento=False):
+    filas = []
+    for i, r in enumerate(registros):
+        fila = {
+            "Red": r["red"],
+            "Usuario": (
+                f"@{r['handle']}" if r.get("handle")
+                else r.get("autor", "")
+            ),
+            "Texto": r.get("texto", ""),
+        }
+
+        if con_sentimiento:
+            fila.update({
+                "Sentimiento corregido": r.get("sentimiento", ""),
+                "Clasificación inicial": r.get(
+                    "sentimiento_inicial",
+                    r.get("sentimiento", "")
+                ),
+                "Predicción IA": r.get("sentimiento_predicho", ""),
+                "Confianza": float(
+                    r.get("confianza_sentimiento", 0) or 0
+                ),
+            })
+
+        fila.update({
+            "Motivo": r.get("motivo_tema", ""),
+            "Link": r.get("link", ""),
+        })
+        filas.append(fila)
+
+    return pd.DataFrame(filas)
+
+
 def render_extractor_onclusive():
     st.subheader("Extracción de menciones Onclusive por tema")
-    st.caption("Versión 2.2 · filtro temático + análisis de sentimiento local opcional")
     st.caption(
-        "Filtra por tema real, conserva impactos distintos aunque repitan texto, elimina RT/permalinks duplicados "
-        "y genera Word, HTML y TXT."
+        "Versión 2.3 · filtro temático + sentimiento local + "
+        "revisión manual editable"
+    )
+    st.caption(
+        "Filtra por tema real, conserva impactos distintos aunque repitan texto, "
+        "elimina RT/permalinks duplicados y permite corregir el sentimiento "
+        "antes de generar entregables."
     )
 
+    # -----------------------------------------------------------------
+    # Entradas de extracción
+    # -----------------------------------------------------------------
     tema = st.text_input(
         "Tema principal",
-        placeholder="Ej. Gaby La Bonita Sánchez como aspirante por la alcaldía de Puebla",
+        placeholder=(
+            "Ej. Gaby La Bonita Sánchez como aspirante "
+            "por la alcaldía de Puebla"
+        ),
         key="onclusive_tema",
         help=(
-            "El programa extrae automáticamente las palabras útiles del tema y las usa para decidir qué publicaciones pertenecen a él."
+            "El programa extrae automáticamente las palabras útiles "
+            "del tema y las usa para decidir qué publicaciones pertenecen a él."
         ),
     ).strip()
 
@@ -925,7 +1060,14 @@ def render_extractor_onclusive():
 
     if tema:
         detectados = terminos_desde_tema(tema)
-        st.caption("Palabras detectadas del tema: " + (", ".join(detectados) if detectados else "sin términos suficientes"))
+        st.caption(
+            "Palabras detectadas del tema: "
+            + (
+                ", ".join(detectados)
+                if detectados
+                else "sin términos suficientes"
+            )
+        )
     else:
         detectados = []
 
@@ -933,26 +1075,34 @@ def render_extractor_onclusive():
         aliases_txt = st.text_area(
             "Actor, nombre y alias (opcional, recomendado cuando el tema es una persona)",
             placeholder=(
-                "Gaby Sánchez, Gabriela Sánchez, La Bonita, Bonita Sánchez, Bonita_sanchez\n"
-                "Si escribes alias aquí, la publicación deberá mencionar al menos uno."
+                "Gaby Sánchez, Gabriela Sánchez, La Bonita, "
+                "Bonita Sánchez, Bonita_sanchez\n"
+                "Si escribes alias aquí, la publicación deberá "
+                "mencionar al menos uno."
             ),
             key="onclusive_aliases",
             height=95,
         )
         extras_txt = st.text_area(
             "Sinónimos o conceptos adicionales del tema (opcional)",
-            placeholder="presidencia municipal, candidatura, proceso interno, levanta la mano, se destapa, contender, 2027",
+            placeholder=(
+                "presidencia municipal, candidatura, proceso interno, "
+                "levanta la mano, se destapa, contender, 2027"
+            ),
             key="onclusive_terminos_extra",
             height=85,
         )
         exclusiones_txt = st.text_area(
             "Excluir siempre si aparece alguna de estas frases (opcional)",
-            placeholder="Escribe solo exclusiones absolutas, una por línea o separadas por coma",
+            placeholder=(
+                "Escribe solo exclusiones absolutas, "
+                "una por línea o separadas por coma"
+            ),
             key="onclusive_exclusiones",
             height=75,
             help=(
-                "Estas exclusiones tienen prioridad incluso si la publicación también coincide con el tema. "
-                "Evita poner términos muy generales como 'deporte' si una nota política también puede mencionarlos."
+                "Estas exclusiones tienen prioridad incluso si la publicación "
+                "también coincide con el tema."
             ),
         )
         cuentas_txt = st.text_area(
@@ -962,16 +1112,20 @@ def render_extractor_onclusive():
             height=70,
         )
 
-        max_slider = max(1, min(5, len(detectados) + len(parsear_lista_reglas(extras_txt))))
+        max_slider = max(
+            1,
+            min(
+                5,
+                len(detectados)
+                + len(parsear_lista_reglas(extras_txt))
+            )
+        )
 
-        # Streamlit no permite un slider cuando min_value == max_value.
-        # Esto ocurre, por ejemplo, cuando todavía no se ha escrito el tema
-        # o cuando solo se detecta una palabra/concepto útil.
         if max_slider <= 1:
             min_coincidencias = 1
             st.caption(
                 "Coincidencias mínimas con el tema: 1. "
-                "Al agregar más términos al tema podrás ajustar este valor."
+                "Al agregar más términos podrás ajustar este valor."
             )
         else:
             min_coincidencias = st.slider(
@@ -981,8 +1135,7 @@ def render_extractor_onclusive():
                 value=2,
                 help=(
                     "Con 2, una publicación que solo diga 'Puebla' no entra. "
-                    "Sube el valor para temas muy amplios; bájalo si el tema "
-                    "tiene pocas palabras específicas."
+                    "Sube el valor para temas muy amplios."
                 ),
                 key="onclusive_min_coincidencias",
             )
@@ -999,38 +1152,32 @@ def render_extractor_onclusive():
         dedup_texto = st.checkbox(
             "Eliminar mismo texto del mismo usuario",
             value=False,
-            help=(
-                "Déjalo desactivado para trabajar como la extracción revisada: dos posts distintos cuentan como dos impactos aunque tengan el mismo texto."
-            ),
             key="onclusive_dedup_texto",
         )
     with c2:
         recortar = st.checkbox(
             "Recortar textos largos",
             value=False,
-            help="Desactivado conserva el texto completo limpio, como en la extracción revisada.",
             key="onclusive_recortar",
         )
     with c3:
         resolver = st.checkbox(
             "Resolver usuarios IG/TikTok",
             value=False,
-            help=(
-                "Intento opcional para publicaciones públicas. No usa login ni intenta evadir restricciones."
-            ),
             key="onclusive_resolver_usuarios",
         )
 
-
+    # -----------------------------------------------------------------
+    # Sentimiento opcional
+    # -----------------------------------------------------------------
     st.markdown("### Análisis de sentimiento (opcional)")
     analizar_sentimiento = st.checkbox(
         "Realizar análisis de sentimiento local",
         value=False,
         key="onclusive_analizar_sentimiento",
         help=(
-            "Solo se ejecuta si lo activas. "
-            "No utiliza API: entrena un modelo local con "
-            "entrenamiento_sentimiento.csv."
+            "Solo se ejecuta si lo activas. No utiliza API: "
+            "entrena un modelo local."
         ),
     )
 
@@ -1052,8 +1199,7 @@ def render_extractor_onclusive():
             step=0.05,
             key="onclusive_umbral_sentimiento",
             help=(
-                "Si la confianza queda por debajo del umbral, "
-                "la publicación se marca como REVISAR."
+                "Debajo del umbral, la publicación queda como REVISAR."
             ),
         )
 
@@ -1062,13 +1208,27 @@ def render_extractor_onclusive():
             type=["csv", "xlsx", "xls"],
             key="onclusive_dataset_sentimiento_extra",
             help=(
-                "Debe tener como mínimo las columnas texto y etiqueta. "
-                "Se mezcla con la base inicial de La Bonita."
+                "Puedes subir directamente el Excel corregido que "
+                "descarga esta versión."
             ),
         )
 
-    if archivo and tema and st.button("Extraer menciones", type="primary", key="onclusive_extraer"):
-        with st.spinner("Identificando el tema, aplicando exclusiones y preparando entregables..."):
+    # -----------------------------------------------------------------
+    # Ejecutar extracción y GUARDAR resultado en session_state.
+    # Esto permite que st.data_editor sobreviva a cada edición/rerun.
+    # -----------------------------------------------------------------
+    ejecutar = st.button(
+        "Extraer menciones",
+        type="primary",
+        key="onclusive_extraer",
+        disabled=not (archivo and tema),
+    )
+
+    if ejecutar:
+        with st.spinner(
+            "Identificando el tema, aplicando exclusiones y "
+            "preparando resultados..."
+        ):
             try:
                 df = cargar_onclusive(archivo)
                 aliases = parsear_lista_reglas(aliases_txt)
@@ -1092,171 +1252,410 @@ def render_extractor_onclusive():
 
                 if not registros:
                     st.warning(
-                        "No quedaron menciones después del filtro temático. Revisa aliases, exclusiones o baja las coincidencias mínimas."
+                        "No quedaron menciones después del filtro temático."
                     )
-                    if excluidos:
-                        st.dataframe(pd.DataFrame(excluidos), use_container_width=True, hide_index=True)
-                    return
+                    st.session_state["onclusive_resultado"] = {
+                        "registros": [],
+                        "excluidos": excluidos,
+                        "stats": dict(stats),
+                        "tema": tema,
+                        "redes": list(redes_seleccionadas),
+                        "analizar_sentimiento": False,
+                        "resumen_entrenamiento": {},
+                    }
+                else:
+                    resumen_modelo = {}
 
-                if analizar_sentimiento:
-                    if not SKLEARN_DISPONIBLE:
-                        st.error(
-                            "No se puede ejecutar sentimiento hasta "
-                            "instalar scikit-learn."
-                        )
-                        return
-
-                    with st.spinner(
-                        "Entrenando el modelo local y clasificando..."
-                    ):
-                        modelo_sentimiento, df_entrenamiento = (
-                            entrenar_desde_archivos(
-                                dataset_sentimiento_extra
+                    if analizar_sentimiento:
+                        if not SKLEARN_DISPONIBLE:
+                            st.error(
+                                "No se puede ejecutar sentimiento hasta "
+                                "instalar scikit-learn."
                             )
+                            return
+
+                        with st.spinner(
+                            "Entrenando el modelo local y clasificando..."
+                        ):
+                            modelo_sentimiento, df_entrenamiento = (
+                                entrenar_desde_archivos(
+                                    dataset_sentimiento_extra
+                                )
+                            )
+                            registros = clasificar_registros(
+                                registros,
+                                modelo_sentimiento,
+                                umbral=umbral_sentimiento,
+                            )
+
+                        resumen_modelo = resumen_entrenamiento(
+                            df_entrenamiento
                         )
-                        registros = clasificar_registros(
-                            registros,
-                            modelo_sentimiento,
-                            umbral=umbral_sentimiento,
-                        )
 
-                    resumen_modelo = resumen_entrenamiento(
-                        df_entrenamiento
-                    )
-                    st.caption(
-                        "Entrenamiento usado: "
-                        + " · ".join(
-                            f"{k}: {v}"
-                            for k, v in resumen_modelo.items()
-                        )
-                    )
+                        # Guardar estado inicial antes de cualquier corrección manual.
+                        for r in registros:
+                            r["sentimiento_inicial"] = r.get(
+                                "sentimiento", ""
+                            )
 
-                    conteo_sent = Counter(
-                        r.get("sentimiento", "")
-                        for r in registros
-                    )
-                    st.write(
-                        "Clasificación: "
-                        + " · ".join(
-                            f"{_titulo_sentimiento(k)}: {v}"
-                            for k, v in conteo_sent.items()
-                        )
-                    )
-
-                    st.info(
-                        "La base inicial contiene 99 publicaciones "
-                        "del caso de Gaby 'La Bonita' Sánchez. "
-                        "Es una semilla: conviene revisar los casos "
-                        "marcados como REVISAR y agregar ejemplos "
-                        "de otros actores y temas."
-                    )
-
-                total_por_red = Counter(r["red"] for r in registros)
-                st.success(f"Se extrajeron {len(registros)} menciones relacionadas con el tema.")
-                st.write(
-                    " · ".join(
-                        f"{red.title() if red != 'X' else 'X'}: {total_por_red.get(red, 0)}"
-                        for red in ["X", "FACEBOOK", "INSTAGRAM", "TIKTOK"]
-                        if red in redes_seleccionadas
-                    )
-                )
-
-                st.caption(
-                    "Omitidas/depuradas: "
-                    f"fuera de tema {stats['fuera_tema']}, "
-                    f"cuentas excluidas {stats['cuenta_excluida']}, "
-                    f"otras redes {stats['otras_redes']}, RT {stats['rt']}, "
-                    f"duplicados por link {stats['dup_link']}, "
-                    f"duplicados por texto {stats['dup_texto']}, "
-                    f"sin texto {stats['sin_texto']}."
-                )
-
-                # Vista de control: permite comprobar qué entró y qué quedó fuera antes de descargar.
-                tab_in, tab_out = st.tabs([
-                    f"Incluidas ({len(registros)})",
-                    f"Excluidas por tema/reglas ({len(excluidos)})",
-                ])
-                with tab_in:
-                    vista_in = pd.DataFrame([
-                        {
-                            "Red": r["red"],
-                            "Usuario": (f"@{r['handle']}" if r["handle"] else r["autor"]),
-                            "Texto": r["texto"],
-                            "Sentimiento": r.get("sentimiento", ""),
-                            "Confianza": (
-                                f"{r.get('confianza_sentimiento', 0):.1%}"
-                                if analizar_sentimiento
-                                else ""
-                            ),
-                            "Motivo": r.get("motivo_tema", ""),
-                            "Link": r["link"],
-                        }
-                        for r in registros
-                    ])
-                    st.dataframe(vista_in, use_container_width=True, hide_index=True)
-                with tab_out:
-                    if excluidos:
-                        vista_out = pd.DataFrame([
-                            {
-                                "Red": r["red"],
-                                "Usuario": (f"@{r['handle']}" if r.get("handle") else r.get("autor")),
-                                "Motivo de exclusión": r.get("motivo", ""),
-                                "Texto": r.get("texto", ""),
-                                "Link": r.get("link", ""),
-                            }
-                            for r in excluidos
-                        ])
-                        st.dataframe(vista_out, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("No hubo publicaciones excluidas por el filtro temático.")
-
-                faltan_handle = sum(
-                    1 for r in registros if r["red"] in {"X", "INSTAGRAM", "TIKTOK"} and not r["handle"]
-                )
-                if faltan_handle:
-                    st.info(
-                        f"{faltan_handle} publicación(es) no permitieron identificar un @usuario con los datos disponibles. "
-                        "Se conservó el nombre del autor/página cuando estaba disponible."
-                    )
-
-                if analizar_sentimiento:
-                    st.download_button(
-                        "📥 Descargar CSV para corregir y seguir entrenando",
-                        data=csv_revision(registros, tema),
-                        file_name="revision_sentimiento.csv",
-                        mime="text/csv",
-                        key="onclusive_revision_sentimiento",
-                        help=(
-                            "Corrige la columna etiqueta y vuelve a cargar "
-                            "ese archivo como dataset adicional en una "
-                            "ejecución futura."
+                    st.session_state["onclusive_resultado"] = {
+                        "registros": registros,
+                        "excluidos": excluidos,
+                        "stats": dict(stats),
+                        "tema": tema,
+                        "redes": list(redes_seleccionadas),
+                        "analizar_sentimiento": bool(
+                            analizar_sentimiento
                         ),
+                        "resumen_entrenamiento": resumen_modelo,
+                    }
+
+                    # Fuerza una nueva identidad del editor para la nueva extracción.
+                    st.session_state.pop(
+                        "onclusive_editor_sentimiento", None
                     )
 
-                base = re.sub(r"[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ_-]+", "_", tema).strip("_") or "tema"
-                word = crear_word(registros, tema)
-                html_bytes = crear_html(registros)
-                txt_bytes = crear_txt(registros)
-
-                st.download_button(
-                    "📥 Descargar Word",
-                    data=word,
-                    file_name=f"Extraccion_{base}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-                st.download_button(
-                    "📥 Descargar HTML",
-                    data=html_bytes,
-                    file_name=f"Extraccion_{base}.html",
-                    mime="text/html",
-                )
-                st.download_button(
-                    "📥 Descargar TXT",
-                    data=txt_bytes,
-                    file_name=f"Extraccion_{base}.txt",
-                    mime="text/plain",
-                )
             except Exception as exc:
                 st.error(f"Error al procesar el archivo: {exc}")
+                return
 
+    # -----------------------------------------------------------------
+    # Resultado persistente: se mantiene aunque el editor provoque reruns.
+    # -----------------------------------------------------------------
+    resultado = st.session_state.get("onclusive_resultado")
 
+    if not resultado:
+        return
+
+    registros = resultado.get("registros", [])
+    excluidos = resultado.get("excluidos", [])
+    stats = Counter(resultado.get("stats", {}))
+    tema_resultado = resultado.get("tema", tema)
+    redes_resultado = resultado.get("redes", [])
+    con_sentimiento = bool(
+        resultado.get("analizar_sentimiento", False)
+    )
+
+    if not registros:
+        if excluidos:
+            st.dataframe(
+                pd.DataFrame(excluidos),
+                use_container_width=True,
+                hide_index=True,
+            )
+        return
+
+    total_por_red = Counter(r["red"] for r in registros)
+    st.success(
+        f"Se extrajeron {len(registros)} menciones relacionadas con el tema."
+    )
+    st.write(
+        " · ".join(
+            f"{red.title() if red != 'X' else 'X'}: "
+            f"{total_por_red.get(red, 0)}"
+            for red in ["X", "FACEBOOK", "INSTAGRAM", "TIKTOK"]
+            if red in redes_resultado
+        )
+    )
+
+    st.caption(
+        "Omitidas/depuradas: "
+        f"fuera de tema {stats['fuera_tema']}, "
+        f"cuentas excluidas {stats['cuenta_excluida']}, "
+        f"otras redes {stats['otras_redes']}, RT {stats['rt']}, "
+        f"duplicados por link {stats['dup_link']}, "
+        f"duplicados por texto {stats['dup_texto']}, "
+        f"sin texto {stats['sin_texto']}."
+    )
+
+    if con_sentimiento:
+        resumen_modelo = resultado.get(
+            "resumen_entrenamiento", {}
+        )
+        if resumen_modelo:
+            st.caption(
+                "Entrenamiento usado: "
+                + " · ".join(
+                    f"{k}: {v}"
+                    for k, v in resumen_modelo.items()
+                )
+            )
+
+    # -----------------------------------------------------------------
+    # VISTA DE CONTROL / EDICIÓN
+    # -----------------------------------------------------------------
+    tab_in, tab_out = st.tabs([
+        f"Incluidas ({len(registros)})",
+        f"Excluidas por tema/reglas ({len(excluidos)})",
+    ])
+
+    with tab_in:
+        if con_sentimiento:
+            st.markdown("#### Revisar sentimiento")
+            st.caption(
+                "La columna **Sentimiento corregido** es editable. "
+                "Las demás columnas quedan bloqueadas para evitar cambios "
+                "accidentales. Cada selección se conserva durante la sesión."
+            )
+
+            vista_in = _vista_registros(
+                registros,
+                con_sentimiento=True,
+            )
+
+            editada = st.data_editor(
+                vista_in,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key="onclusive_editor_sentimiento",
+                disabled=[
+                    "Red",
+                    "Usuario",
+                    "Texto",
+                    "Clasificación inicial",
+                    "Predicción IA",
+                    "Confianza",
+                    "Motivo",
+                    "Link",
+                ],
+                column_config={
+                    "Sentimiento corregido":
+                        st.column_config.SelectboxColumn(
+                            "Sentimiento corregido",
+                            options=[
+                                POSITIVA_INFORMATIVA,
+                                NEGATIVA_CRITICA,
+                                REVISAR,
+                            ],
+                            required=True,
+                            width="medium",
+                            help=(
+                                "Selecciona la clasificación que consideras "
+                                "correcta para esta publicación."
+                            ),
+                        ),
+                    "Confianza":
+                        st.column_config.NumberColumn(
+                            "Confianza",
+                            format="%.1f%%",
+                            width="small",
+                        ),
+                    "Texto":
+                        st.column_config.TextColumn(
+                            "Texto",
+                            width="large",
+                        ),
+                    "Link":
+                        st.column_config.LinkColumn(
+                            "Link",
+                            width="medium",
+                        ),
+                },
+            )
+
+            # Aplicar inmediatamente lo seleccionado al resultado persistente.
+            if len(editada) == len(registros):
+                for i, valor in enumerate(
+                    editada["Sentimiento corregido"].tolist()
+                ):
+                    valor = str(valor or REVISAR).upper()
+                    if valor not in {
+                        POSITIVA_INFORMATIVA,
+                        NEGATIVA_CRITICA,
+                        REVISAR,
+                    }:
+                        valor = REVISAR
+                    registros[i]["sentimiento"] = valor
+
+                # Reasignar para que Word/Excel/TXT usen las correcciones.
+                resultado["registros"] = registros
+                st.session_state["onclusive_resultado"] = resultado
+
+            correcciones = sum(
+                1
+                for r in registros
+                if str(r.get("sentimiento", "")).upper()
+                != str(
+                    r.get(
+                        "sentimiento_inicial",
+                        r.get("sentimiento", "")
+                    )
+                ).upper()
+            )
+            pendientes = sum(
+                1
+                for r in registros
+                if str(r.get("sentimiento", "")).upper()
+                == REVISAR
+            )
+
+            c_a, c_b, c_c = st.columns(3)
+            c_a.metric(
+                "Positivas / informativas",
+                sum(
+                    1 for r in registros
+                    if r.get("sentimiento")
+                    == POSITIVA_INFORMATIVA
+                ),
+            )
+            c_b.metric(
+                "Negativas / críticas",
+                sum(
+                    1 for r in registros
+                    if r.get("sentimiento")
+                    == NEGATIVA_CRITICA
+                ),
+            )
+            c_c.metric(
+                "Pendientes de revisar",
+                pendientes,
+                delta=(
+                    f"{correcciones} corrección(es) manual(es)"
+                    if correcciones
+                    else None
+                ),
+                delta_color="off",
+            )
+
+            if pendientes:
+                st.warning(
+                    f"Aún hay {pendientes} publicación(es) en REVISAR. "
+                    "Puedes descargarlas, pero quedarán con etiqueta vacía "
+                    "en el Excel de entrenamiento y no se usarán para aprender."
+                )
+            else:
+                st.success(
+                    "Todas las publicaciones tienen una etiqueta válida "
+                    "para entrenamiento."
+                )
+
+        else:
+            vista_in = _vista_registros(
+                registros,
+                con_sentimiento=False,
+            )
+            st.dataframe(
+                vista_in,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tab_out:
+        if excluidos:
+            vista_out = pd.DataFrame([
+                {
+                    "Red": r["red"],
+                    "Usuario": (
+                        f"@{r['handle']}"
+                        if r.get("handle")
+                        else r.get("autor")
+                    ),
+                    "Motivo de exclusión": r.get("motivo", ""),
+                    "Texto": r.get("texto", ""),
+                    "Link": r.get("link", ""),
+                }
+                for r in excluidos
+            ])
+            st.dataframe(
+                vista_out,
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info(
+                "No hubo publicaciones excluidas por el filtro temático."
+            )
+
+    # -----------------------------------------------------------------
+    # Descargas
+    # -----------------------------------------------------------------
+    st.markdown("### Descargas")
+
+    if con_sentimiento:
+        excel_entrenamiento = crear_excel_entrenamiento(
+            registros,
+            tema_resultado,
+        )
+        st.download_button(
+            "📥 Descargar Excel corregido para entrenamiento",
+            data=excel_entrenamiento,
+            file_name="entrenamiento_sentimiento_corregido.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="onclusive_excel_entrenamiento",
+            help=(
+                "Este mismo archivo puede cargarse después en "
+                "'Dataset de sentimiento corregido/adicional'."
+            ),
+        )
+
+        st.download_button(
+            "📥 Descargar CSV corregido para entrenamiento",
+            data=csv_revision(registros, tema_resultado),
+            file_name="entrenamiento_sentimiento_corregido.csv",
+            mime="text/csv",
+            key="onclusive_csv_entrenamiento",
+        )
+
+    faltan_handle = sum(
+        1
+        for r in registros
+        if r["red"] in {"X", "INSTAGRAM", "TIKTOK"}
+        and not r.get("handle")
+    )
+    if faltan_handle:
+        st.info(
+            f"{faltan_handle} publicación(es) no permitieron identificar "
+            "un @usuario. Se conservó el nombre disponible."
+        )
+
+    base = re.sub(
+        r"[^A-Za-z0-9ÁÉÍÓÚáéíóúÑñ_-]+",
+        "_",
+        tema_resultado,
+    ).strip("_") or "tema"
+
+    # IMPORTANTE: estos entregables se generan DESPUÉS de aplicar
+    # las correcciones del editor.
+    word = crear_word(registros, tema_resultado)
+    html_bytes = crear_html(registros)
+    txt_bytes = crear_txt(registros)
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.download_button(
+            "📥 Descargar Word",
+            data=word,
+            file_name=f"Extraccion_{base}.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+        )
+    with d2:
+        st.download_button(
+            "📥 Descargar HTML",
+            data=html_bytes,
+            file_name=f"Extraccion_{base}.html",
+            mime="text/html",
+        )
+    with d3:
+        st.download_button(
+            "📥 Descargar TXT",
+            data=txt_bytes,
+            file_name=f"Extraccion_{base}.txt",
+            mime="text/plain",
+        )
+
+    if st.button(
+        "🗑️ Limpiar resultado actual",
+        key="onclusive_limpiar_resultado",
+    ):
+        st.session_state.pop("onclusive_resultado", None)
+        st.session_state.pop(
+            "onclusive_editor_sentimiento", None
+        )
+        st.rerun()
