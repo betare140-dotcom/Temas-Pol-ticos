@@ -807,18 +807,29 @@ def render_extractor_onclusive():
         )
 
         max_slider = max(1, min(5, len(detectados) + len(parsear_lista_reglas(extras_txt))))
-        default_min = 1 if max_slider == 1 else 2
-        min_coincidencias = st.slider(
-            "Coincidencias mínimas con el tema",
-            min_value=1,
-            max_value=max_slider,
-            value=min(default_min, max_slider),
-            help=(
-                "Con 2, una publicación que solo diga 'Puebla' no entra. Sube el valor para temas muy amplios; "
-                "bájalo si el tema tiene pocas palabras específicas."
-            ),
-            key="onclusive_min_coincidencias",
-        )
+
+        # Streamlit no permite un slider cuando min_value == max_value.
+        # Esto ocurre, por ejemplo, cuando todavía no se ha escrito el tema
+        # o cuando solo se detecta una palabra/concepto útil.
+        if max_slider <= 1:
+            min_coincidencias = 1
+            st.caption(
+                "Coincidencias mínimas con el tema: 1. "
+                "Al agregar más términos al tema podrás ajustar este valor."
+            )
+        else:
+            min_coincidencias = st.slider(
+                "Coincidencias mínimas con el tema",
+                min_value=1,
+                max_value=max_slider,
+                value=2,
+                help=(
+                    "Con 2, una publicación que solo diga 'Puebla' no entra. "
+                    "Sube el valor para temas muy amplios; bájalo si el tema "
+                    "tiene pocas palabras específicas."
+                ),
+                key="onclusive_min_coincidencias",
+            )
 
     redes_seleccionadas = st.multiselect(
         "Redes a incluir",
