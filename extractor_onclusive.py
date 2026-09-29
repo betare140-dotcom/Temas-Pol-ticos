@@ -21,6 +21,9 @@ from sentimiento_local import (
     clasificar_registros,
     resumen_entrenamiento,
     csv_revision,
+    guardar_aprendizaje_interno,
+    sincronizar_base_con_github,
+    estado_base_interna,
 )
 
 try:
@@ -1037,141 +1040,6 @@ def render_extractor_onclusive():
     )
 
     # -----------------------------------------------------------------
-    # ADMINISTRADOR INDEPENDIENTE DEL MODELO
-    # -----------------------------------------------------------------
-    st.markdown("### Modelo de aprendizaje")
-    st.caption(
-        "Puedes cargar y entrenar el modelo de sentimiento sin subir un archivo "
-        "de Onclusive ni realizar una extracción."
-    )
-
-    with st.expander("Cargar / actualizar modelo de aprendizaje", expanded=True):
-        modelo_aprendizaje = st.file_uploader(
-            "Sube una base de aprendizaje (Excel o CSV)",
-            type=["xlsx", "xls", "csv"],
-            key="onclusive_modelo_aprendizaje_global",
-            help=(
-                "Debe contener al menos las columnas 'texto' y 'etiqueta'. "
-                "Se combinará con la base inicial incluida en la app."
-            ),
-        )
-
-        c_modelo_1, c_modelo_2 = st.columns([2, 1])
-
-        if modelo_aprendizaje is not None:
-            try:
-                # Valida y contabiliza sin necesitar ninguna extracción.
-                _, df_modelo_preview = entrenar_desde_archivos(
-                    modelo_aprendizaje
-                )
-                modelo_aprendizaje.seek(0)
-
-                resumen_preview = resumen_entrenamiento(
-                    df_modelo_preview
-                )
-                total_preview = len(df_modelo_preview)
-
-                with c_modelo_1:
-                    st.success(
-                        f"Base válida: {total_preview} ejemplos disponibles."
-                    )
-                    st.caption(
-                        " · ".join(
-                            f"{k}: {v}"
-                            for k, v in resumen_preview.items()
-                        )
-                    )
-
-                with c_modelo_2:
-                    if st.button(
-                        "Entrenar modelo ahora",
-                        type="primary",
-                        key="onclusive_entrenar_modelo_global",
-                    ):
-                        modelo_aprendizaje.seek(0)
-                        with st.spinner(
-                            "Entrenando el modelo local..."
-                        ):
-                            modelo_entrenado, df_entrenamiento_global = (
-                                entrenar_desde_archivos(
-                                    modelo_aprendizaje
-                                )
-                            )
-
-                        st.session_state[
-                            "modelo_sentimiento_entrenado"
-                        ] = modelo_entrenado
-                        st.session_state[
-                            "modelo_sentimiento_resumen"
-                        ] = resumen_entrenamiento(
-                            df_entrenamiento_global
-                        )
-                        st.session_state[
-                            "modelo_sentimiento_nombre"
-                        ] = getattr(
-                            modelo_aprendizaje,
-                            "name",
-                            "modelo_subido",
-                        )
-                        st.success(
-                            "Modelo entrenado y listo para usarse "
-                            "en esta sesión."
-                        )
-            except Exception as exc:
-                st.error(
-                    f"No fue posible validar la base de aprendizaje: {exc}"
-                )
-
-        if "modelo_sentimiento_entrenado" in st.session_state:
-            nombre_modelo = st.session_state.get(
-                "modelo_sentimiento_nombre",
-                "modelo cargado",
-            )
-            resumen_activo = st.session_state.get(
-                "modelo_sentimiento_resumen",
-                {},
-            )
-
-            st.info(
-                f"Modelo activo en esta sesión: {nombre_modelo}"
-            )
-            if resumen_activo:
-                st.caption(
-                    "Entrenamiento activo: "
-                    + " · ".join(
-                        f"{k}: {v}"
-                        for k, v in resumen_activo.items()
-                    )
-                )
-
-            if st.button(
-                "Quitar modelo activo de la sesión",
-                key="onclusive_quitar_modelo_global",
-            ):
-                st.session_state.pop(
-                    "modelo_sentimiento_entrenado",
-                    None,
-                )
-                st.session_state.pop(
-                    "modelo_sentimiento_resumen",
-                    None,
-                )
-                st.session_state.pop(
-                    "modelo_sentimiento_nombre",
-                    None,
-                )
-                st.rerun()
-
-        st.caption(
-            "El modelo queda activo durante la sesión actual. "
-            "Si Streamlit se reinicia o vuelves a desplegar la app, "
-            "deberás cargarlo otra vez, salvo que sustituyas la base "
-            "entrenamiento_sentimiento.csv dentro del repositorio."
-        )
-
-    st.divider()
-
-    # -----------------------------------------------------------------
     # Entradas de extracción
     # -----------------------------------------------------------------
     tema = st.text_input(
@@ -1311,13 +1179,12 @@ def render_extractor_onclusive():
         value=False,
         key="onclusive_analizar_sentimiento",
         help=(
-            "Solo se ejecuta si lo activas. No utiliza API: "
-            "entrena un modelo local."
+            "Solo se ejecuta si lo activas. Usa la base interna acumulada "
+            "y no depende de una API de inteligencia artificial."
         ),
     )
 
     umbral_sentimiento = 0.70
-    dataset_sentimiento_extra = None
 
     if analizar_sentimiento:
         if not SKLEARN_DISPONIBLE:
@@ -1325,6 +1192,14 @@ def render_extractor_onclusive():
                 "Falta scikit-learn. Agrega "
                 "'scikit-learn>=1.4,<2' a requirements.txt."
             )
+
+        estado_modelo = estado_base_interna()
+        st.info(
+            "Aprendizaje interno disponible: "
+            f"{estado_modelo['total']} ejemplos · "
+            f"positivas/informativas {estado_modelo['positivas']} · "
+            f"negativas/críticas {estado_modelo['negativas']}."
+        )
 
         umbral_sentimiento = st.slider(
             "Confianza mínima para aceptar la clasificación",
@@ -1335,17 +1210,6 @@ def render_extractor_onclusive():
             key="onclusive_umbral_sentimiento",
             help=(
                 "Debajo del umbral, la publicación queda como REVISAR."
-            ),
-        )
-
-        dataset_sentimiento_extra = st.file_uploader(
-            "Dataset de sentimiento corregido/adicional (opcional)",
-            type=["csv", "xlsx", "xls"],
-            key="onclusive_dataset_sentimiento_extra",
-            help=(
-                "Opcional. Si ya entrenaste un modelo en la sección superior, "
-                "puedes dejar este campo vacío. Si subes un archivo aquí, "
-                "se entrenará un modelo específico para esta extracción."
             ),
         )
 
@@ -1410,47 +1274,21 @@ def render_extractor_onclusive():
                             )
                             return
 
-                        # Prioridad del modelo:
-                        # 1) Dataset específico subido para esta extracción.
-                        # 2) Modelo ya entrenado en la sección superior.
-                        # 3) Base incluida por defecto.
-                        if dataset_sentimiento_extra is not None:
-                            with st.spinner(
-                                "Entrenando el modelo específico..."
-                            ):
-                                modelo_sentimiento, df_entrenamiento = (
-                                    entrenar_desde_archivos(
-                                        dataset_sentimiento_extra
-                                    )
-                                )
-                            resumen_modelo = resumen_entrenamiento(
-                                df_entrenamiento
+                        with st.spinner(
+                            "Entrenando con el aprendizaje interno "
+                            "y clasificando..."
+                        ):
+                            modelo_sentimiento, df_entrenamiento = (
+                                entrenar_desde_archivos(None)
+                            )
+                            registros = clasificar_registros(
+                                registros,
+                                modelo_sentimiento,
+                                umbral=umbral_sentimiento,
                             )
 
-                        elif "modelo_sentimiento_entrenado" in st.session_state:
-                            modelo_sentimiento = st.session_state[
-                                "modelo_sentimiento_entrenado"
-                            ]
-                            resumen_modelo = st.session_state.get(
-                                "modelo_sentimiento_resumen",
-                                {},
-                            )
-
-                        else:
-                            with st.spinner(
-                                "Entrenando el modelo base..."
-                            ):
-                                modelo_sentimiento, df_entrenamiento = (
-                                    entrenar_desde_archivos(None)
-                                )
-                            resumen_modelo = resumen_entrenamiento(
-                                df_entrenamiento
-                            )
-
-                        registros = clasificar_registros(
-                            registros,
-                            modelo_sentimiento,
-                            umbral=umbral_sentimiento,
+                        resumen_modelo = resumen_entrenamiento(
+                            df_entrenamiento
                         )
 
                         # Guardar estado inicial antes de cualquier corrección manual.
@@ -1727,6 +1565,120 @@ def render_extractor_onclusive():
             st.info(
                 "No hubo publicaciones excluidas por el filtro temático."
             )
+
+    # -----------------------------------------------------------------
+    # APRENDIZAJE INTERNO
+    # -----------------------------------------------------------------
+    if con_sentimiento:
+        st.markdown("### Aprendizaje interno")
+
+        resueltos = sum(
+            1
+            for r in registros
+            if str(r.get("sentimiento", "")).upper()
+            in {POSITIVA_INFORMATIVA, NEGATIVA_CRITICA}
+        )
+        pendientes_guardado = sum(
+            1
+            for r in registros
+            if str(r.get("sentimiento", "")).upper()
+            == REVISAR
+        )
+
+        st.caption(
+            "Cuando termines la revisión, guarda las etiquetas corregidas. "
+            "La app las agregará a su base interna y la próxima extracción "
+            "entrenará con ese aprendizaje acumulado."
+        )
+
+        if st.button(
+            "💾 Guardar correcciones en el aprendizaje interno",
+            type="primary",
+            key="onclusive_guardar_aprendizaje_interno",
+            disabled=(resueltos == 0),
+        ):
+            try:
+                resultado_guardado = guardar_aprendizaje_interno(
+                    registros,
+                    tema=tema_resultado,
+                )
+
+                # Reentrenar inmediatamente para dejar el modelo actualizado
+                # dentro de la sesión actual.
+                modelo_nuevo, df_nuevo = entrenar_desde_archivos(None)
+                st.session_state[
+                    "modelo_sentimiento_actualizado"
+                ] = modelo_nuevo
+
+                st.success(
+                    "Aprendizaje actualizado: "
+                    f"{resultado_guardado['guardados']} registros procesados. "
+                    f"Base interna actual: {resultado_guardado['total']} ejemplos "
+                    f"({resultado_guardado['positivas']} positivas/informativas · "
+                    f"{resultado_guardado['negativas']} negativas/críticas)."
+                )
+
+                if pendientes_guardado:
+                    st.info(
+                        f"{pendientes_guardado} publicación(es) siguen en REVISAR "
+                        "y no se guardaron como entrenamiento."
+                    )
+
+                # Persistencia automática opcional para Streamlit Cloud.
+                # No usa una API de IA; solo guarda el CSV de entrenamiento
+                # en el repositorio GitHub para sobrevivir reinicios/deploys.
+                try:
+                    gh_token = str(
+                        st.secrets.get("GITHUB_TOKEN", "")
+                    ).strip()
+                    gh_repo = str(
+                        st.secrets.get("GITHUB_REPO", "")
+                    ).strip()
+                    gh_branch = str(
+                        st.secrets.get("GITHUB_BRANCH", "main")
+                    ).strip() or "main"
+                    gh_path = str(
+                        st.secrets.get(
+                            "GITHUB_TRAINING_PATH",
+                            "entrenamiento_sentimiento.csv",
+                        )
+                    ).strip() or "entrenamiento_sentimiento.csv"
+                except Exception:
+                    gh_token = ""
+                    gh_repo = ""
+                    gh_branch = "main"
+                    gh_path = "entrenamiento_sentimiento.csv"
+
+                if gh_token and gh_repo:
+                    with st.spinner(
+                        "Guardando aprendizaje de forma persistente..."
+                    ):
+                        sincronizar_base_con_github(
+                            token=gh_token,
+                            repo=gh_repo,
+                            branch=gh_branch,
+                            ruta_repo=gh_path,
+                            mensaje=(
+                                "Actualizar aprendizaje de sentimiento "
+                                f"desde Streamlit: {tema_resultado[:80]}"
+                            ),
+                        )
+                    st.success(
+                        "Base de aprendizaje guardada también en GitHub. "
+                        "Se conservará después de reinicios y nuevos deploys."
+                    )
+                else:
+                    st.warning(
+                        "La base quedó actualizada dentro de la instancia actual. "
+                        "En Streamlit Cloud ese archivo puede perderse al reiniciar "
+                        "la app. Para conservarlo automáticamente entre reinicios, "
+                        "configura GITHUB_TOKEN y GITHUB_REPO en Secrets."
+                    )
+
+            except Exception as exc:
+                st.error(
+                    f"No fue posible guardar el aprendizaje: {exc}"
+                )
 
     # -----------------------------------------------------------------
     # Descargas
