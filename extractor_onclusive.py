@@ -993,26 +993,94 @@ def crear_excel_entrenamiento(registros, tema=""):
     return out.getvalue()
 
 
+def _usuario_visible(registro):
+    if registro.get("handle"):
+        return f"@{registro['handle']}"
+    return str(registro.get("autor", "") or "").strip()
+
+
+def _aplicar_usuario_editado(registro, valor):
+    """
+    Permite completar/corregir el usuario desde la tabla.
+
+    Casos admitidos:
+    - @usuario
+    - usuario
+    - Nombre visible @usuario
+    """
+    valor = str(valor or "").strip()
+
+    if not valor:
+        registro["handle"] = ""
+        registro["autor"] = ""
+        return
+
+    coincidencia = re.search(r"@([A-Za-z0-9_.-]+)", valor)
+    if coincidencia:
+        registro["handle"] = coincidencia.group(1).strip()
+        nombre = valor[:coincidencia.start()].strip(" -|")
+        if nombre:
+            registro["autor"] = nombre
+        return
+
+    # Si no incluye @, se conserva como nombre visible.
+    registro["autor"] = valor
+    if not registro.get("handle"):
+        registro["handle"] = ""
+
+
+def _sentimiento_para_descarga(registro):
+    """
+    El estado REVISAR es operativo, no bloquea la clasificación.
+
+    Si el usuario todavía no revisó una fila de baja confianza,
+    la descarga conserva la predicción original del modelo.
+    """
+    actual = str(registro.get("sentimiento", "") or "").upper().strip()
+
+    if actual == REVISAR:
+        pred = str(
+            registro.get("sentimiento_predicho", "") or ""
+        ).upper().strip()
+        if pred in {POSITIVA_INFORMATIVA, NEGATIVA_CRITICA}:
+            return pred
+
+    return actual
+
+
+def _registros_para_descarga(registros):
+    salida = []
+    for r in registros:
+        nuevo = dict(r)
+        final = _sentimiento_para_descarga(nuevo)
+        if final:
+            nuevo["sentimiento"] = final
+        salida.append(nuevo)
+    return salida
+
+
 def _vista_registros(registros, con_sentimiento=False):
     filas = []
     for i, r in enumerate(registros):
         fila = {
-            "Red": r["red"],
-            "Usuario": (
-                f"@{r['handle']}" if r.get("handle")
-                else r.get("autor", "")
-            ),
+            "N.º": i + 1,
+            "Red": r.get("red", ""),
+            "Usuario": _usuario_visible(r),
             "Texto": r.get("texto", ""),
         }
 
         if con_sentimiento:
+            requiere_revision = (
+                str(r.get("sentimiento", "") or "").upper() == REVISAR
+            )
             fila.update({
                 "Sentimiento corregido": r.get("sentimiento", ""),
-                "Clasificación inicial": r.get(
-                    "sentimiento_inicial",
-                    r.get("sentimiento", "")
+                "Predicción del modelo": r.get(
+                    "sentimiento_predicho", ""
                 ),
-                "Predicción IA": r.get("sentimiento_predicho", ""),
+                "Revisión": (
+                    "REVISAR" if requiere_revision else "OK"
+                ),
                 "Confianza": float(
                     r.get("confianza_sentimiento", 0) or 0
                 ),
@@ -1025,6 +1093,57 @@ def _vista_registros(registros, con_sentimiento=False):
         filas.append(fila)
 
     return pd.DataFrame(filas)
+
+
+def _contenido_dialogo_nota(registro, con_sentimiento=False):
+    usuario = _usuario_visible(registro) or "Usuario no identificado"
+    st.caption(
+        f"{registro.get('red', '')} · {usuario}"
+    )
+
+    if con_sentimiento:
+        pred = str(
+            registro.get("sentimiento_predicho", "") or ""
+        ).replace("_", " ")
+        conf = float(
+            registro.get("confianza_sentimiento", 0) or 0
+        )
+        final = _sentimiento_para_descarga(registro).replace("_", " ")
+
+        c1, c2 = st.columns(2)
+        c1.metric("Clasificación para descarga", final)
+        c2.metric("Confianza del modelo", f"{conf:.1%}")
+
+        if str(registro.get("sentimiento", "")).upper() == REVISAR:
+            st.info(
+                "Esta publicación está marcada para revisión, pero si no "
+                "la modificas se descargará con la predicción original "
+                "del modelo."
+            )
+
+    st.markdown("##### Nota completa")
+    st.write(str(registro.get("texto", "") or ""))
+
+    motivo = str(registro.get("motivo_tema", "") or "").strip()
+    if motivo:
+        st.caption(f"Coincidencia temática: {motivo}")
+
+    link = str(registro.get("link", "") or "").strip()
+    if link:
+        st.link_button("Abrir publicación original", link)
+
+
+def _abrir_dialogo_nota(registro, con_sentimiento=False):
+    _contenido_dialogo_nota(registro, con_sentimiento)
+
+
+# st.dialog está disponible en las versiones recientes de Streamlit.
+# Si no existe, la aplicación usa un expander como alternativa.
+if hasattr(st, "dialog"):
+    _abrir_dialogo_nota = st.dialog(
+        "Vista completa de la publicación",
+        width="large",
+    )(_abrir_dialogo_nota)
 
 
 def render_extractor_onclusive():
@@ -1313,6 +1432,12 @@ def render_extractor_onclusive():
                     st.session_state.pop(
                         "onclusive_editor_sentimiento", None
                     )
+                    st.session_state.pop(
+                        "onclusive_editor_principal", None
+                    )
+                    st.session_state.pop(
+                        "onclusive_nota_seleccionada", None
+                    )
 
             except Exception as exc:
                 st.error(f"Error al procesar el archivo: {exc}")
@@ -1384,161 +1509,255 @@ def render_extractor_onclusive():
     # VISTA DE CONTROL / EDICIÓN
     # -----------------------------------------------------------------
     tab_in, tab_out = st.tabs([
-        f"Incluidas ({len(registros)})",
-        f"Excluidas por tema/reglas ({len(excluidos)})",
+        f"🧾 Vista previa ({len(registros)})",
+        f"🚫 Excluidas ({len(excluidos)})",
     ])
 
     with tab_in:
+        st.markdown("#### Mesa de revisión")
+        st.caption(
+            "Puedes completar o corregir el usuario directamente en la tabla. "
+            "El texto se conserva completo y puede abrirse en una ventana de "
+            "lectura. Si activaste sentimiento, también puedes corregirlo."
+        )
+
+        faltan_usuario = sum(
+            1 for r in registros
+            if not str(_usuario_visible(r)).strip()
+        )
+
+        pendientes = (
+            sum(
+                1 for r in registros
+                if str(r.get("sentimiento", "")).upper() == REVISAR
+            )
+            if con_sentimiento
+            else 0
+        )
+
+        # Las métricas de sentimiento representan lo que saldrá en la descarga.
+        registros_previa_descarga = _registros_para_descarga(registros)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Publicaciones", len(registros))
+        m2.metric("Usuarios por completar", faltan_usuario)
+
         if con_sentimiento:
-            st.markdown("#### Revisar sentimiento")
-            st.caption(
-                "La columna **Sentimiento corregido** es editable. "
-                "Las demás columnas quedan bloqueadas para evitar cambios "
-                "accidentales. Cada selección se conserva durante la sesión."
+            m3.metric(
+                "Positivas / informativas",
+                sum(
+                    1 for r in registros_previa_descarga
+                    if str(r.get("sentimiento", "")).upper()
+                    == POSITIVA_INFORMATIVA
+                ),
             )
-
-            vista_in = _vista_registros(
-                registros,
-                con_sentimiento=True,
+            m4.metric(
+                "Negativas / críticas",
+                sum(
+                    1 for r in registros_previa_descarga
+                    if str(r.get("sentimiento", "")).upper()
+                    == NEGATIVA_CRITICA
+                ),
             )
+            if pendientes:
+                st.info(
+                    f"{pendientes} publicación(es) están marcadas para revisar "
+                    "por baja confianza. La revisión es opcional para descargar: "
+                    "si no las modificas, se conservará la predicción del modelo."
+                )
+        else:
+            m3.metric("Análisis de sentimiento", "No aplicado")
+            m4.metric("Vista completa", "Disponible")
 
-            editada = st.data_editor(
-                vista_in,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed",
-                key="onclusive_editor_sentimiento",
-                disabled=[
-                    "Red",
-                    "Usuario",
-                    "Texto",
-                    "Clasificación inicial",
-                    "Predicción IA",
-                    "Confianza",
-                    "Motivo",
-                    "Link",
-                ],
-                column_config={
-                    "Sentimiento corregido":
-                        st.column_config.SelectboxColumn(
-                            "Sentimiento corregido",
-                            options=[
-                                POSITIVA_INFORMATIVA,
-                                NEGATIVA_CRITICA,
-                                REVISAR,
-                            ],
-                            required=True,
-                            width="medium",
-                            help=(
-                                "Selecciona la clasificación que consideras "
-                                "correcta para esta publicación."
-                            ),
-                        ),
-                    "Confianza":
-                        st.column_config.NumberColumn(
-                            "Confianza",
-                            format="%.1f%%",
-                            width="small",
-                        ),
-                    "Texto":
-                        st.column_config.TextColumn(
-                            "Texto",
-                            width="large",
-                        ),
-                    "Link":
-                        st.column_config.LinkColumn(
-                            "Link",
-                            width="medium",
-                        ),
-                },
-            )
+        vista_in = _vista_registros(
+            registros,
+            con_sentimiento=con_sentimiento,
+        )
 
-            # Aplicar inmediatamente lo seleccionado al resultado persistente.
-            if len(editada) == len(registros):
-                for i, valor in enumerate(
-                    editada["Sentimiento corregido"].tolist()
-                ):
-                    valor = str(valor or REVISAR).upper()
+        columnas_bloqueadas = [
+            "N.º",
+            "Red",
+            "Texto",
+            "Motivo",
+            "Link",
+        ]
+
+        config_columnas = {
+            "N.º": st.column_config.NumberColumn(
+                "N.º",
+                width="small",
+            ),
+            "Red": st.column_config.TextColumn(
+                "Red",
+                width="small",
+            ),
+            "Usuario": st.column_config.TextColumn(
+                "Usuario",
+                width="medium",
+                help=(
+                    "Editable. Puedes escribir @usuario o "
+                    "Nombre visible @usuario."
+                ),
+            ),
+            "Texto": st.column_config.TextColumn(
+                "Vista previa de la nota",
+                width="large",
+                help=(
+                    "El texto completo se puede abrir debajo de la tabla "
+                    "con el botón 'Ver nota completa'."
+                ),
+            ),
+            "Motivo": st.column_config.TextColumn(
+                "Coincidencia temática",
+                width="medium",
+            ),
+            "Link": st.column_config.LinkColumn(
+                "Publicación",
+                display_text="Abrir",
+                width="small",
+            ),
+        }
+
+        if con_sentimiento:
+            columnas_bloqueadas += [
+                "Predicción del modelo",
+                "Revisión",
+                "Confianza",
+            ]
+            config_columnas.update({
+                "Sentimiento corregido":
+                    st.column_config.SelectboxColumn(
+                        "Sentimiento",
+                        options=[
+                            POSITIVA_INFORMATIVA,
+                            NEGATIVA_CRITICA,
+                            REVISAR,
+                        ],
+                        required=True,
+                        width="medium",
+                        help=(
+                            "REVISAR indica baja confianza. Si no cambias "
+                            "esa fila, la descarga utilizará la predicción "
+                            "original del modelo."
+                        ),
+                    ),
+                "Predicción del modelo":
+                    st.column_config.TextColumn(
+                        "Predicción del modelo",
+                        width="medium",
+                    ),
+                "Revisión":
+                    st.column_config.TextColumn(
+                        "Estado",
+                        width="small",
+                    ),
+                "Confianza":
+                    st.column_config.NumberColumn(
+                        "Confianza",
+                        format="%.1f%%",
+                        width="small",
+                    ),
+            })
+
+        editada = st.data_editor(
+            vista_in,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            row_height=68,
+            height=min(760, 115 + max(1, len(vista_in)) * 68),
+            key="onclusive_editor_principal",
+            disabled=columnas_bloqueadas,
+            column_config=config_columnas,
+        )
+
+        # Aplicar inmediatamente los cambios del usuario y del sentimiento.
+        if len(editada) == len(registros):
+            for i, r in enumerate(registros):
+                usuario_editado = editada.iloc[i]["Usuario"]
+                _aplicar_usuario_editado(
+                    r,
+                    usuario_editado,
+                )
+
+                if con_sentimiento:
+                    valor = str(
+                        editada.iloc[i]["Sentimiento corregido"]
+                        or REVISAR
+                    ).upper()
                     if valor not in {
                         POSITIVA_INFORMATIVA,
                         NEGATIVA_CRITICA,
                         REVISAR,
                     }:
                         valor = REVISAR
-                    registros[i]["sentimiento"] = valor
+                    r["sentimiento"] = valor
 
-                # Reasignar para que Word/Excel/TXT usen las correcciones.
-                resultado["registros"] = registros
-                st.session_state["onclusive_resultado"] = resultado
+            resultado["registros"] = registros
+            st.session_state["onclusive_resultado"] = resultado
 
-            correcciones = sum(
-                1
-                for r in registros
-                if str(r.get("sentimiento", "")).upper()
-                != str(
-                    r.get(
-                        "sentimiento_inicial",
-                        r.get("sentimiento", "")
-                    )
-                ).upper()
-            )
-            pendientes = sum(
-                1
-                for r in registros
-                if str(r.get("sentimiento", "")).upper()
-                == REVISAR
-            )
+        # -------------------------------------------------------------
+        # Lector de nota completa: funciona con o sin sentimiento.
+        # -------------------------------------------------------------
+        st.markdown("##### Lectura completa")
+        opciones = list(range(len(registros)))
 
-            c_a, c_b, c_c = st.columns(3)
-            c_a.metric(
-                "Positivas / informativas",
-                sum(
-                    1 for r in registros
-                    if r.get("sentimiento")
-                    == POSITIVA_INFORMATIVA
-                ),
-            )
-            c_b.metric(
-                "Negativas / críticas",
-                sum(
-                    1 for r in registros
-                    if r.get("sentimiento")
-                    == NEGATIVA_CRITICA
-                ),
-            )
-            c_c.metric(
-                "Pendientes de revisar",
-                pendientes,
-                delta=(
-                    f"{correcciones} corrección(es) manual(es)"
-                    if correcciones
-                    else None
-                ),
-                delta_color="off",
-            )
+        seleccion = st.selectbox(
+            "Selecciona una publicación",
+            options=opciones,
+            key="onclusive_nota_seleccionada",
+            format_func=lambda i: (
+                f"{i + 1}. "
+                f"{_usuario_visible(registros[i]) or 'Usuario no identificado'}"
+                f" — "
+                f"{str(registros[i].get('texto', '') or '')[:105]}"
+                f"{'…' if len(str(registros[i].get('texto', '') or '')) > 105 else ''}"
+            ),
+        )
 
-            if pendientes:
-                st.warning(
-                    f"Aún hay {pendientes} publicación(es) en REVISAR. "
-                    "Puedes descargarlas, pero quedarán con etiqueta vacía "
-                    "en el Excel de entrenamiento y no se usarán para aprender."
+        if st.button(
+            "🔎 Ver nota completa",
+            key="onclusive_ver_nota_completa",
+        ):
+            if hasattr(st, "dialog"):
+                _abrir_dialogo_nota(
+                    registros[seleccion],
+                    con_sentimiento,
                 )
             else:
-                st.success(
-                    "Todas las publicaciones tienen una etiqueta válida "
-                    "para entrenamiento."
+                st.session_state[
+                    "onclusive_mostrar_nota_fallback"
+                ] = seleccion
+
+        if (
+            not hasattr(st, "dialog")
+            and st.session_state.get(
+                "onclusive_mostrar_nota_fallback"
+            ) is not None
+        ):
+            idx_fallback = st.session_state[
+                "onclusive_mostrar_nota_fallback"
+            ]
+            with st.expander(
+                "Vista completa de la publicación",
+                expanded=True,
+            ):
+                _contenido_dialogo_nota(
+                    registros[idx_fallback],
+                    con_sentimiento,
                 )
 
-        else:
-            vista_in = _vista_registros(
-                registros,
-                con_sentimiento=False,
-            )
-            st.dataframe(
-                vista_in,
-                use_container_width=True,
-                hide_index=True,
-            )
+        # Resumen de cambios operativos.
+        usuarios_completados = sum(
+            1 for r in registros
+            if str(_usuario_visible(r)).strip()
+        )
+        st.caption(
+            f"Usuarios identificados/completados: "
+            f"{usuarios_completados}/{len(registros)}. "
+            "Los cambios de usuario y sentimiento se aplican "
+            "automáticamente a los archivos de descarga."
+        )
 
     with tab_out:
         if excluidos:
@@ -1560,6 +1779,17 @@ def render_extractor_onclusive():
                 vista_out,
                 use_container_width=True,
                 hide_index=True,
+                row_height=58,
+                column_config={
+                    "Texto": st.column_config.TextColumn(
+                        "Texto",
+                        width="large",
+                    ),
+                    "Link": st.column_config.LinkColumn(
+                        "Publicación",
+                        display_text="Abrir",
+                    ),
+                },
             )
         else:
             st.info(
@@ -1700,8 +1930,9 @@ def render_extractor_onclusive():
             ),
             key="onclusive_excel_entrenamiento",
             help=(
-                "Este mismo archivo puede cargarse después en "
-                "'Dataset de sentimiento corregido/adicional'."
+                "Archivo de respaldo con las etiquetas revisadas. "
+                "Las filas todavía marcadas REVISAR quedan sin etiqueta "
+                "de entrenamiento."
             ),
         )
 
@@ -1731,11 +1962,14 @@ def render_extractor_onclusive():
         tema_resultado,
     ).strip("_") or "tema"
 
-    # IMPORTANTE: estos entregables se generan DESPUÉS de aplicar
-    # las correcciones del editor.
-    word = crear_word(registros, tema_resultado)
-    html_bytes = crear_html(registros)
-    txt_bytes = crear_txt(registros)
+    # IMPORTANTE:
+    # - Se respetan los usuarios/sentimientos corregidos en la tabla.
+    # - Si una fila sigue en REVISAR, la descarga usa la predicción
+    #   original del modelo para que la revisión manual no sea obligatoria.
+    registros_descarga = _registros_para_descarga(registros)
+    word = crear_word(registros_descarga, tema_resultado)
+    html_bytes = crear_html(registros_descarga)
+    txt_bytes = crear_txt(registros_descarga)
 
     d1, d2, d3 = st.columns(3)
     with d1:
