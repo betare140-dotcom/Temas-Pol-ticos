@@ -1062,10 +1062,14 @@ def _registros_para_descarga(registros):
 def _vista_registros(registros, con_sentimiento=False):
     filas = []
     for i, r in enumerate(registros):
+        usuario_actual = _usuario_visible(r)
+        usuario_identificado = bool(str(usuario_actual).strip())
+
         fila = {
             "N.º": i + 1,
             "Red": r.get("red", ""),
-            "Usuario": _usuario_visible(r),
+            "Usuario": usuario_actual if usuario_identificado else "NO IDENTIFICADO",
+            "Usuario por completar": "" if usuario_identificado else "",
             "Texto": r.get("texto", ""),
         }
 
@@ -1516,9 +1520,11 @@ def render_extractor_onclusive():
     with tab_in:
         st.markdown("#### Mesa de revisión")
         st.caption(
-            "Puedes completar o corregir el usuario directamente en la tabla. "
-            "El texto se conserva completo y puede abrirse en una ventana de "
-            "lectura. Si activaste sentimiento, también puedes corregirlo."
+            "Solo puedes completar el usuario cuando no fue identificado "
+            "automáticamente. Los usuarios ya recuperados quedan bloqueados "
+            "para evitar errores. El texto completo puede abrirse en una "
+            "ventana de lectura y, si activaste sentimiento, también puedes "
+            "corregirlo."
         )
 
         faltan_usuario = sum(
@@ -1540,7 +1546,7 @@ def render_extractor_onclusive():
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Publicaciones", len(registros))
-        m2.metric("Usuarios por completar", faltan_usuario)
+        m2.metric("Usuarios no identificados", faltan_usuario)
 
         if con_sentimiento:
             m3.metric(
@@ -1594,13 +1600,23 @@ def render_extractor_onclusive():
                 disabled=True,
             ),
             "Usuario": st.column_config.TextColumn(
-                "Usuario",
+                "Usuario detectado",
+                width="medium",
+                disabled=True,
+                help=(
+                    "Solo lectura. Si no pudo identificarse, aparecerá "
+                    "'NO IDENTIFICADO'."
+                ),
+            ),
+            "Usuario por completar": st.column_config.TextColumn(
+                "Completar usuario",
                 width="medium",
                 disabled=False,
                 required=False,
                 help=(
-                    "EDITABLE. Haz doble clic en la celda o selecciónala "
-                    "y escribe @usuario o Nombre visible @usuario."
+                    "Úsala únicamente cuando 'Usuario detectado' muestre "
+                    "'NO IDENTIFICADO'. Puedes escribir @usuario o "
+                    "Nombre visible @usuario."
                 ),
             ),
             "Texto": st.column_config.TextColumn(
@@ -1682,14 +1698,23 @@ def render_extractor_onclusive():
             column_config=config_columnas,
         )
 
-        # Aplicar inmediatamente los cambios del usuario y del sentimiento.
+        # Aplicar cambios:
+        # - El usuario solo puede completarse si NO fue identificado.
+        # - Los usuarios ya recuperados nunca se sobrescriben desde la tabla.
+        # - El sentimiento sí puede corregirse cuando el análisis está activo.
         if len(editada) == len(registros):
             for i, r in enumerate(registros):
-                usuario_editado = editada.iloc[i]["Usuario"]
-                _aplicar_usuario_editado(
-                    r,
-                    usuario_editado,
-                )
+                usuario_actual = _usuario_visible(r)
+
+                if not str(usuario_actual).strip():
+                    usuario_editado = str(
+                        editada.iloc[i]["Usuario por completar"] or ""
+                    ).strip()
+                    if usuario_editado:
+                        _aplicar_usuario_editado(
+                            r,
+                            usuario_editado,
+                        )
 
                 if con_sentimiento:
                     valor = str(
@@ -1706,56 +1731,6 @@ def render_extractor_onclusive():
 
             resultado["registros"] = registros
             st.session_state["onclusive_resultado"] = resultado
-
-        # -------------------------------------------------------------
-        # Editor manual alternativo de usuario
-        # -------------------------------------------------------------
-        with st.expander("✏️ Completar o corregir usuario manualmente"):
-            st.caption(
-                "Úsalo si tu navegador no permite escribir directamente "
-                "dentro de la celda de la tabla."
-            )
-
-            opciones_usuario = list(range(len(registros)))
-            fila_usuario = st.selectbox(
-                "Publicación",
-                options=opciones_usuario,
-                key="onclusive_fila_usuario_manual",
-                format_func=lambda i: (
-                    f"{i + 1}. "
-                    f"{_usuario_visible(registros[i]) or 'Usuario no identificado'}"
-                    f" — "
-                    f"{str(registros[i].get('texto', '') or '')[:90]}"
-                    f"{'…' if len(str(registros[i].get('texto', '') or '')) > 90 else ''}"
-                ),
-            )
-
-            usuario_actual = _usuario_visible(registros[fila_usuario])
-            usuario_manual = st.text_input(
-                "Usuario / @usuario",
-                value=usuario_actual,
-                key=f"onclusive_usuario_manual_{fila_usuario}",
-                placeholder="@usuario",
-            )
-
-            if st.button(
-                "Aplicar usuario",
-                key="onclusive_aplicar_usuario_manual",
-            ):
-                _aplicar_usuario_editado(
-                    registros[fila_usuario],
-                    usuario_manual,
-                )
-                resultado["registros"] = registros
-                st.session_state["onclusive_resultado"] = resultado
-
-                # Refrescar el editor principal para mostrar el nuevo dato.
-                st.session_state.pop(
-                    "onclusive_editor_principal",
-                    None,
-                )
-                st.success("Usuario actualizado.")
-                st.rerun()
 
         # -------------------------------------------------------------
         # Lector de nota completa: funciona con o sin sentimiento.
@@ -1816,8 +1791,9 @@ def render_extractor_onclusive():
         st.caption(
             f"Usuarios identificados/completados: "
             f"{usuarios_completados}/{len(registros)}. "
-            "Los cambios de usuario y sentimiento se aplican "
-            "automáticamente a los archivos de descarga."
+            "Solo los registros sin usuario detectado aceptan un usuario "
+            "manual. Los cambios válidos se aplican automáticamente "
+            "a los archivos de descarga."
         )
 
     with tab_out:
