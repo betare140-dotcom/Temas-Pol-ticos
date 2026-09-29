@@ -843,65 +843,356 @@ def crear_word(registros, tema):
 
 
 def crear_txt(registros):
+    """
+    Genera TXT con la misma estructura lógica que Word.
+
+    Si hay análisis de sentimiento:
+    - resumen separado por sentimiento;
+    - desglose separado por sentimiento;
+    - respeta usuarios/sentimientos ya corregidos en la vista previa.
+
+    Si no hay sentimiento, conserva el formato simple anterior.
+    """
+    if registros and any(r.get("sentimiento") for r in registros):
+        lineas = [f"REDES SOCIALES ({len(registros)})"]
+
+        # RESUMEN
+        for etiqueta in _orden_sentimientos(registros):
+            grupo = [
+                x for x in registros
+                if str(x.get("sentimiento", "")).upper() == etiqueta
+            ]
+
+            lineas += [
+                "",
+                f"{_titulo_sentimiento(etiqueta)} ({len(grupo)})",
+            ]
+
+            fuentes = [
+                etiqueta_lista(
+                    x["red"],
+                    x["autor"],
+                    x["handle"],
+                )
+                for x in grupo
+            ]
+            conteos = Counter(fuentes)
+            vistos = set()
+
+            for fuente in fuentes:
+                if fuente in vistos:
+                    continue
+                vistos.add(fuente)
+                lineas.append(
+                    f"{fuente} ({conteos[fuente]})"
+                    if conteos[fuente] > 1
+                    else fuente
+                )
+
+        # DESGLOSE
+        lineas += ["", "DESGLOSE"]
+
+        for etiqueta in _orden_sentimientos(registros):
+            grupo = [
+                x for x in registros
+                if str(x.get("sentimiento", "")).upper() == etiqueta
+            ]
+
+            lineas += [
+                "",
+                f"{_titulo_sentimiento(etiqueta)} ({len(grupo)})",
+            ]
+
+            fecha_actual = object()
+            for item in grupo:
+                fecha_key = (
+                    None
+                    if pd.isna(item["fecha"])
+                    else item["fecha"].strftime("%d.%m.%y")
+                )
+
+                if fecha_key != fecha_actual:
+                    fecha_actual = fecha_key
+                    if fecha_key:
+                        lineas += ["", fecha_key]
+
+                lineas += [
+                    fuente_desglose(
+                        item["red"],
+                        item["autor"],
+                        item["handle"],
+                    ),
+                    html.unescape(str(item["texto"] or "")),
+                    item["link"] or "",
+                    "",
+                ]
+
+        return "\n".join(lineas).encode("utf-8")
+
+    # Sin sentimiento: formato simple
     lineas = [f"REDES SOCIALES ({len(registros)})"]
-    etiquetas = [etiqueta_lista(r["red"], r["autor"], r["handle"]) for r in registros]
+    etiquetas = [
+        etiqueta_lista(
+            r["red"],
+            r["autor"],
+            r["handle"],
+        )
+        for r in registros
+    ]
     conteos = Counter(etiquetas)
     vistos = set()
+
     for et in etiquetas:
         if et not in vistos:
             vistos.add(et)
-            lineas.append(f"{et} ({conteos[et]})" if conteos[et] > 1 else et)
+            lineas.append(
+                f"{et} ({conteos[et]})"
+                if conteos[et] > 1
+                else et
+            )
 
     lineas += ["", "DESGLOSE"]
     fecha_actual = object()
+
     for item in registros:
-        fecha_key = None if pd.isna(item["fecha"]) else item["fecha"].strftime("%d.%m.%y")
+        fecha_key = (
+            None
+            if pd.isna(item["fecha"])
+            else item["fecha"].strftime("%d.%m.%y")
+        )
+
         if fecha_key != fecha_actual:
             fecha_actual = fecha_key
             if fecha_key:
                 lineas += ["", fecha_key]
+
         lineas += [
-            fuente_desglose(item["red"], item["autor"], item["handle"]),
-            item["texto"],
-            item["link"],
+            fuente_desglose(
+                item["red"],
+                item["autor"],
+                item["handle"],
+            ),
+            html.unescape(str(item["texto"] or "")),
+            item["link"] or "",
             "",
         ]
+
     return "\n".join(lineas).encode("utf-8")
 
 
 def crear_html(registros):
-    etiquetas = [etiqueta_lista(r["red"], r["autor"], r["handle"]) for r in registros]
-    conteos = Counter(etiquetas)
-    vistos = set()
+    """
+    Genera HTML con la misma estructura lógica que Word y TXT.
+
+    Las correcciones realizadas en la vista previa se aplican antes
+    de llegar a esta función mediante _registros_para_descarga().
+    """
     partes = [
         "<!doctype html><html><head><meta charset='utf-8'>",
-        "<style>body{font-family:Arial,sans-serif;font-size:14px;line-height:1.35} .m{margin-bottom:14px}</style>",
+        "<style>",
+        "body{font-family:Arial,sans-serif;font-size:14px;line-height:1.35}",
+        ".m{margin-bottom:14px}",
+        ".grupo{margin-top:18px;margin-bottom:8px}",
+        ".neg{color:#c00000}",
+        "</style>",
         "</head><body>",
         f"<p><strong>REDES SOCIALES ({len(registros)})</strong></p>",
     ]
+
+    if registros and any(r.get("sentimiento") for r in registros):
+        # RESUMEN
+        for etiqueta in _orden_sentimientos(registros):
+            grupo = [
+                x for x in registros
+                if str(x.get("sentimiento", "")).upper() == etiqueta
+            ]
+
+            clase = (
+                " class='grupo neg'"
+                if etiqueta in {NEGATIVA_CRITICA, "NEGATIVA"}
+                else " class='grupo'"
+            )
+
+            titulo = html.escape(
+                f"{_titulo_sentimiento(etiqueta)} ({len(grupo)})"
+            )
+            partes.append(
+                f"<p{clase}><strong>{titulo}</strong></p>"
+            )
+
+            fuentes = [
+                etiqueta_lista(
+                    x["red"],
+                    x["autor"],
+                    x["handle"],
+                )
+                for x in grupo
+            ]
+            conteos = Counter(fuentes)
+            vistos = set()
+
+            for fuente in fuentes:
+                if fuente in vistos:
+                    continue
+                vistos.add(fuente)
+                txt = (
+                    f"{fuente} ({conteos[fuente]})"
+                    if conteos[fuente] > 1
+                    else fuente
+                )
+                partes.append(
+                    f"<div>{html.escape(txt)}</div>"
+                )
+
+        # DESGLOSE
+        partes.append(
+            "<p class='grupo'><strong>DESGLOSE</strong></p>"
+        )
+
+        for etiqueta in _orden_sentimientos(registros):
+            grupo = [
+                x for x in registros
+                if str(x.get("sentimiento", "")).upper() == etiqueta
+            ]
+
+            clase = (
+                " class='grupo neg'"
+                if etiqueta in {NEGATIVA_CRITICA, "NEGATIVA"}
+                else " class='grupo'"
+            )
+            titulo = html.escape(
+                f"{_titulo_sentimiento(etiqueta)} ({len(grupo)})"
+            )
+            partes.append(
+                f"<p{clase}><strong>{titulo}</strong></p>"
+            )
+
+            fecha_actual = object()
+            for item in grupo:
+                fecha_key = (
+                    None
+                    if pd.isna(item["fecha"])
+                    else item["fecha"].strftime("%d.%m.%y")
+                )
+
+                if fecha_key != fecha_actual:
+                    fecha_actual = fecha_key
+                    if fecha_key:
+                        partes.append(
+                            f"<p><strong>{html.escape(fecha_key)}</strong></p>"
+                        )
+
+                fuente = html.escape(
+                    fuente_desglose(
+                        item["red"],
+                        item["autor"],
+                        item["handle"],
+                    )
+                )
+
+                # Primero decodifica entidades que ya vengan de Onclusive
+                # y después escapa para HTML una sola vez.
+                texto = html.escape(
+                    html.unescape(
+                        str(item["texto"] or "")
+                    )
+                )
+                link_raw = str(item["link"] or "")
+                link = html.escape(
+                    link_raw,
+                    quote=True,
+                )
+                link_texto = html.escape(link_raw)
+                link_html = (
+                    f'<a href="{link}">{link_texto}</a>'
+                    if link_raw
+                    else ""
+                )
+
+                partes.append(
+                    "<div class='m'>"
+                    f"<strong>{fuente}</strong><br>"
+                    f"{texto}<br>"
+                    f"{link_html}"
+                    "</div>"
+                )
+
+        partes.append("</body></html>")
+        return "".join(partes).encode("utf-8")
+
+    # Sin sentimiento: formato simple anterior
+    etiquetas = [
+        etiqueta_lista(
+            r["red"],
+            r["autor"],
+            r["handle"],
+        )
+        for r in registros
+    ]
+    conteos = Counter(etiquetas)
+    vistos = set()
+
     for et in etiquetas:
         if et in vistos:
             continue
         vistos.add(et)
-        txt = f"{et} ({conteos[et]})" if conteos[et] > 1 else et
-        partes.append(f"<div>{html.escape(txt)}</div>")
+        txt = (
+            f"{et} ({conteos[et]})"
+            if conteos[et] > 1
+            else et
+        )
+        partes.append(
+            f"<div>{html.escape(txt)}</div>"
+        )
 
     partes.append("<p><strong>DESGLOSE</strong></p>")
     fecha_actual = object()
+
     for item in registros:
-        fecha_key = None if pd.isna(item["fecha"]) else item["fecha"].strftime("%d.%m.%y")
+        fecha_key = (
+            None
+            if pd.isna(item["fecha"])
+            else item["fecha"].strftime("%d.%m.%y")
+        )
+
         if fecha_key != fecha_actual:
             fecha_actual = fecha_key
             if fecha_key:
-                partes.append(f"<p><strong>{fecha_key}</strong></p>")
-        fuente = html.escape(fuente_desglose(item["red"], item["autor"], item["handle"]))
-        texto = html.escape(item["texto"])
-        link = html.escape(item["link"] or "")
-        link_html = f'<a href="{link}">{link}</a>' if link else ""
-        partes.append(f"<div class='m'><strong>{fuente}</strong><br>{texto}<br>{link_html}</div>")
+                partes.append(
+                    f"<p><strong>{html.escape(fecha_key)}</strong></p>"
+                )
+
+        fuente = html.escape(
+            fuente_desglose(
+                item["red"],
+                item["autor"],
+                item["handle"],
+            )
+        )
+        texto = html.escape(
+            html.unescape(
+                str(item["texto"] or "")
+            )
+        )
+        link_raw = str(item["link"] or "")
+        link = html.escape(link_raw, quote=True)
+        link_texto = html.escape(link_raw)
+        link_html = (
+            f'<a href="{link}">{link_texto}</a>'
+            if link_raw
+            else ""
+        )
+
+        partes.append(
+            "<div class='m'>"
+            f"<strong>{fuente}</strong><br>"
+            f"{texto}<br>"
+            f"{link_html}"
+            "</div>"
+        )
+
     partes.append("</body></html>")
     return "".join(partes).encode("utf-8")
-
 
 
 def crear_excel_entrenamiento(registros, tema=""):
@@ -1153,8 +1444,8 @@ if hasattr(st, "dialog"):
 def render_extractor_onclusive():
     st.subheader("Extracción de menciones Onclusive por tema")
     st.caption(
-        "Versión 2.3 · filtro temático + sentimiento local + "
-        "revisión manual editable"
+        "Versión 2.6.3 · formatos unificados + vista previa editable + "
+        "aprendizaje interno"
     )
     st.caption(
         "Filtra por tema real, conserva impactos distintos aunque repitan texto, "
