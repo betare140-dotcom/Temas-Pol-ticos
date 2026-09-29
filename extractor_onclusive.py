@@ -1586,22 +1586,27 @@ def render_extractor_onclusive():
             "N.º": st.column_config.NumberColumn(
                 "N.º",
                 width="small",
+                disabled=True,
             ),
             "Red": st.column_config.TextColumn(
                 "Red",
                 width="small",
+                disabled=True,
             ),
             "Usuario": st.column_config.TextColumn(
                 "Usuario",
                 width="medium",
+                disabled=False,
+                required=False,
                 help=(
-                    "Editable. Puedes escribir @usuario o "
-                    "Nombre visible @usuario."
+                    "EDITABLE. Haz doble clic en la celda o selecciónala "
+                    "y escribe @usuario o Nombre visible @usuario."
                 ),
             ),
             "Texto": st.column_config.TextColumn(
                 "Vista previa de la nota",
                 width="large",
+                disabled=True,
                 help=(
                     "El texto completo se puede abrir debajo de la tabla "
                     "con el botón 'Ver nota completa'."
@@ -1610,11 +1615,13 @@ def render_extractor_onclusive():
             "Motivo": st.column_config.TextColumn(
                 "Coincidencia temática",
                 width="medium",
+                disabled=True,
             ),
             "Link": st.column_config.LinkColumn(
                 "Publicación",
                 display_text="Abrir",
                 width="small",
+                disabled=True,
             ),
         }
 
@@ -1628,6 +1635,7 @@ def render_extractor_onclusive():
                 "Sentimiento corregido":
                     st.column_config.SelectboxColumn(
                         "Sentimiento",
+                        disabled=False,
                         options=[
                             POSITIVA_INFORMATIVA,
                             NEGATIVA_CRITICA,
@@ -1645,17 +1653,20 @@ def render_extractor_onclusive():
                     st.column_config.TextColumn(
                         "Predicción del modelo",
                         width="medium",
+                        disabled=True,
                     ),
                 "Revisión":
                     st.column_config.TextColumn(
                         "Estado",
                         width="small",
+                        disabled=True,
                     ),
                 "Confianza":
                     st.column_config.NumberColumn(
                         "Confianza",
                         format="%.1f%%",
                         width="small",
+                        disabled=True,
                     ),
             })
 
@@ -1667,7 +1678,7 @@ def render_extractor_onclusive():
             row_height=68,
             height=min(760, 115 + max(1, len(vista_in)) * 68),
             key="onclusive_editor_principal",
-            disabled=columnas_bloqueadas,
+            disabled=False,
             column_config=config_columnas,
         )
 
@@ -1695,6 +1706,56 @@ def render_extractor_onclusive():
 
             resultado["registros"] = registros
             st.session_state["onclusive_resultado"] = resultado
+
+        # -------------------------------------------------------------
+        # Editor manual alternativo de usuario
+        # -------------------------------------------------------------
+        with st.expander("✏️ Completar o corregir usuario manualmente"):
+            st.caption(
+                "Úsalo si tu navegador no permite escribir directamente "
+                "dentro de la celda de la tabla."
+            )
+
+            opciones_usuario = list(range(len(registros)))
+            fila_usuario = st.selectbox(
+                "Publicación",
+                options=opciones_usuario,
+                key="onclusive_fila_usuario_manual",
+                format_func=lambda i: (
+                    f"{i + 1}. "
+                    f"{_usuario_visible(registros[i]) or 'Usuario no identificado'}"
+                    f" — "
+                    f"{str(registros[i].get('texto', '') or '')[:90]}"
+                    f"{'…' if len(str(registros[i].get('texto', '') or '')) > 90 else ''}"
+                ),
+            )
+
+            usuario_actual = _usuario_visible(registros[fila_usuario])
+            usuario_manual = st.text_input(
+                "Usuario / @usuario",
+                value=usuario_actual,
+                key=f"onclusive_usuario_manual_{fila_usuario}",
+                placeholder="@usuario",
+            )
+
+            if st.button(
+                "Aplicar usuario",
+                key="onclusive_aplicar_usuario_manual",
+            ):
+                _aplicar_usuario_editado(
+                    registros[fila_usuario],
+                    usuario_manual,
+                )
+                resultado["registros"] = registros
+                st.session_state["onclusive_resultado"] = resultado
+
+                # Refrescar el editor principal para mostrar el nuevo dato.
+                st.session_state.pop(
+                    "onclusive_editor_principal",
+                    None,
+                )
+                st.success("Usuario actualizado.")
+                st.rerun()
 
         # -------------------------------------------------------------
         # Lector de nota completa: funciona con o sin sentimiento.
